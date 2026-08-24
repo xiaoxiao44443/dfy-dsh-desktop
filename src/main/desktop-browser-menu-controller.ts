@@ -71,6 +71,7 @@ export class DesktopBrowserMenuController {
         devTools: false,
       },
     })
+    if (process.platform === 'darwin') menu.excludedFromShownWindowsMenu = true
     menu.setMenuBarVisibility(false)
     menu.setFocusable(false)
     menu.on('closed', () => {
