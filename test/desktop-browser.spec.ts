@@ -18,6 +18,10 @@ afterEach(() => vi.unstubAllGlobals())
 describe('desktop browser settings', () => {
   it('keeps its styles mounted with the settings section across plugin hot reloads', () => {
     const clientSource = readFileSync(new URL('../resources/dsh-desktop-browser/lib/client.js', import.meta.url), 'utf8')
+    expect(clientSource).toContain('在 Finder 中显示')
+    expect(clientSource).toContain('在资源管理器中显示')
+    expect(clientSource).toContain('在文件管理器中显示')
+    expect(clientSource).toContain('navigator.platform')
     const react = {
       createElement: (type: unknown, props: Record<string, unknown> | null, ...children: unknown[]) => ({
         type,

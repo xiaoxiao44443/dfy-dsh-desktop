@@ -24,6 +24,13 @@ window.__ModuleLoader__.load({
       };
     }
 
+    function revealScreenshotsLabel() {
+      const platform = typeof navigator === "undefined" ? "" : navigator.platform;
+      if (/^Mac/iu.test(platform)) return "在 Finder 中显示";
+      if (/^Win/iu.test(platform)) return "在资源管理器中显示";
+      return "在文件管理器中显示";
+    }
+
     async function request(path, options) {
       const response = await fetch(path, { cache: "no-store", ...options });
       const payload = await response.json().catch(() => ({}));
@@ -269,7 +276,7 @@ window.__ModuleLoader__.load({
             type: "button",
             disabled,
             onClick: () => void revealScreenshots()
-          }, "在 Finder 中显示"),
+          }, revealScreenshotsLabel()),
           React.createElement("button", {
             className: "dsh-desktop-browser-action",
             type: "button",
