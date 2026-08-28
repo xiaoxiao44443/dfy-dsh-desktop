@@ -116,3 +116,7 @@ export function apply(ctx) {
 ## 更新策略
 
 桌面端启动 15 秒后检查 npm 的 `@deepseek-ai/dsh` `latest` 标签，此后每 6 小时检查一次。下载完成后标题栏显示“已就绪”；点击可重启应用，也可以在下次正常启动时自动应用。Harness 核心更新与未来桌面壳自身更新相互独立。
+
+## 许可证
+
+本项目的桌面壳代码基于 [MIT License](LICENSE) 开源。DeepSeek Harness 及其他第三方组件仍分别遵循其各自的许可证。
