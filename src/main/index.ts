@@ -185,9 +185,9 @@ if (!app.requestSingleInstanceLock()) {
     await browser.initialize()
     const pluginManagement = new PluginManagementService(runtime.harnessHome, {
       getWindow: () => windows?.getBrowserWindow(),
-      runPlugin: async (profile, args) => {
+      runPnpm: async (profile, args) => {
         if (harness === undefined) throw new Error('Harness 尚未启动。')
-        return await harness.runPlugin(profile, args)
+        return await harness.runPnpm(profile, args)
       },
     })
     debugLog('[desktop] creating startup window')

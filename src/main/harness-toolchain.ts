@@ -12,6 +12,7 @@ export interface HarnessToolchain {
   binPath: string
   dshCommand: string
   pnpmCommand: string
+  pnpmEntry: string
   nodeCommand: string
 }
 
@@ -163,6 +164,6 @@ export class HarnessToolchainManager {
       ])
     }
 
-    return { binPath: this.binPath, dshCommand, pnpmCommand, nodeCommand }
+    return { binPath: this.binPath, dshCommand, pnpmCommand, pnpmEntry, nodeCommand }
   }
 }

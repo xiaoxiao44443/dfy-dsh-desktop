@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url'
 import { readFile } from 'node:fs/promises'
 import { app, BrowserWindow, clipboard, ipcMain, nativeImage, nativeTheme, shell } from 'electron'
 import type { ContextMenuParams, WebContents, WebFrameMain } from 'electron'
-import type { BrowserDisplayMode, BrowserMenuKind, ColorTheme, DesktopApplicationMenuAction, DesktopBrowserMenuAnchor, DesktopBrowserNavigationAction, DesktopBrowserViewBounds, DesktopBrowserViewport, DesktopPlatform, DesktopState, DevelopmentPluginRequest, HarnessLifecycle, PluginInitializationFailure, PluginInstallRequest, PluginRemoveRequest, TitleMenuAction, WindowAction } from '../shared/contracts.js'
+import type { BrowserDisplayMode, BrowserMenuKind, ColorTheme, DesktopApplicationMenuAction, DesktopBrowserMenuAnchor, DesktopBrowserNavigationAction, DesktopBrowserViewBounds, DesktopBrowserViewport, DesktopPlatform, DesktopState, DevelopmentPluginRequest, HarnessLifecycle, PluginActivationRequest, PluginInitializationFailure, PluginInstallRequest, PluginRemoveRequest, TitleMenuAction, WindowAction } from '../shared/contracts.js'
 import type { DesktopContextMenuActionRequest, DesktopContextMenuRequest, DesktopPointerInput, PluginContextMenuCollection } from '../shared/context-menu.js'
 import { DESKTOP_CONTEXT_MENU_TRANSPORT_KEY, parsePluginContextMenuCollection } from '../shared/context-menu.js'
 import { RUNTIME_PREPARATION_PROGRESS_EVENT, type HarnessRuntimeManager } from './harness-runtime.js'
@@ -408,6 +408,11 @@ export class WindowController {
       if (event.sender !== this.window?.webContents) return
       if (this.plugins === undefined) throw new Error('插件管理服务尚未准备完成。')
       return this.plugins.remove(request)
+    })
+    ipcMain.handle('desktop:plugins-set-active', (event, request: PluginActivationRequest) => {
+      if (event.sender !== this.window?.webContents) return
+      if (this.plugins === undefined) throw new Error('插件管理服务尚未准备完成。')
+      return this.plugins.setActive(request)
     })
     ipcMain.handle('desktop:plugins-open-documentation', async (event) => {
       if (event.sender !== this.window?.webContents) return

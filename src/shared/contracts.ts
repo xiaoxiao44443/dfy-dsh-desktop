@@ -54,6 +54,7 @@ export interface ManagedPluginEntry {
   sourceType: PluginSourceType
   source: string
   active: boolean
+  toggleable: boolean
   removable: boolean
   status: PluginInstallStatus
 }
@@ -77,6 +78,12 @@ export interface PluginInstallRequest {
 export interface PluginRemoveRequest {
   profile: string
   packageName: string
+}
+
+export interface PluginActivationRequest {
+  profile: string
+  packageName: string
+  active: boolean
 }
 
 export interface PluginMutationResult {
@@ -262,6 +269,7 @@ export interface DesktopBridge {
   chooseLocalPluginDirectory(): Promise<string | undefined>
   installPlugin(request: PluginInstallRequest): Promise<PluginMutationResult>
   removePlugin(request: PluginRemoveRequest): Promise<PluginMutationResult>
+  setPluginActive(request: PluginActivationRequest): Promise<PluginMutationResult>
   openPluginDocumentation(): Promise<void>
   setBrowserPanelOpen(open: boolean): Promise<void>
   setBrowserDisplayMode(mode: BrowserDisplayMode): Promise<void>

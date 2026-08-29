@@ -46,6 +46,7 @@ describe('HarnessToolchainManager', () => {
       readFile(toolchain.pnpmCommand, 'utf8'),
       readFile(toolchain.nodeCommand, 'utf8'),
     ])
+    expect(toolchain.pnpmEntry).toBe(pnpmEntry)
     expect(dsh).toContain(entryPath)
     expect(dsh).toContain('harness-bootstrap.cjs')
     expect(pnpm).toContain(pnpmEntry)

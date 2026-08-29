@@ -396,6 +396,7 @@ function PluginManager({
   const [source, setSource] = useState('')
   const [loading, setLoading] = useState(false)
   const [operating, setOperating] = useState(false)
+  const [installing, setInstalling] = useState(false)
   const [error, setError] = useState<string>()
   const [lastResult, setLastResult] = useState<PluginMutationResult>()
   const [restartRequired, setRestartRequired] = useState(false)
@@ -434,14 +435,14 @@ function PluginManager({
   const localCount = managedPlugins.filter((plugin) => plugin.sourceType === 'local').length
   const missingCount = managedPlugins.filter((plugin) => plugin.status === 'missing').length
 
-  const runMutation = useCallback(async (action: () => Promise<PluginMutationResult>) => {
+  const runMutation = useCallback(async (action: () => Promise<PluginMutationResult>, showResult = true) => {
     setOperating(true)
     setError(undefined)
-    setLastResult(undefined)
+    if (showResult) setLastResult(undefined)
     try {
       const result = await action()
       setInventory(result.inventory)
-      setLastResult(result)
+      if (showResult) setLastResult(result)
       if (result.exitCode === 0) setRestartRequired(true)
       else setError(`命令执行失败（退出码 ${result.exitCode}）。`)
       return result.exitCode === 0
@@ -456,7 +457,12 @@ function PluginManager({
   const install = async (): Promise<void> => {
     const value = source.trim()
     if (selectedProfile.length === 0 || value.length === 0) return
-    if (await runMutation(() => desktopApi.installPlugin({ profile: selectedProfile, source: value }))) setSource('')
+    setInstalling(true)
+    try {
+      if (await runMutation(() => desktopApi.installPlugin({ profile: selectedProfile, source: value }))) setSource('')
+    } finally {
+      setInstalling(false)
+    }
   }
 
   const chooseLocal = async (): Promise<void> => {
@@ -475,6 +481,10 @@ function PluginManager({
     }
   }
 
+  const setActive = async (packageName: string, active: boolean): Promise<void> => {
+    await runMutation(() => desktopApi.setPluginActive({ profile: selectedProfile, packageName, active }), false)
+  }
+
   const restart = async (): Promise<void> => {
     setOperating(true)
     setError(undefined)
@@ -491,7 +501,7 @@ function PluginManager({
 
   const renderPlugin = (plugin: ManagedPluginEntry): ReactNode => {
     const confirming = removeConfirmation === plugin.name
-    const stateLabel = plugin.status === 'missing' ? '来源失效' : plugin.active ? '已启用' : '未启用'
+    const stateLabel = plugin.status === 'missing' ? '来源失效' : !plugin.toggleable ? '非插件依赖' : plugin.active ? '已启用' : '已停用'
     return (
       <div className={`plugin-row${plugin.status === 'missing' ? ' missing' : ''}`} key={plugin.name}>
         <div className="plugin-row-main">
@@ -500,7 +510,21 @@ function PluginManager({
           <div className="plugin-source" title={plugin.source}><span className={`plugin-source-badge ${plugin.sourceType}`}>{PLUGIN_SOURCE_LABELS[plugin.sourceType]}</span><code>{plugin.source}</code></div>
         </div>
         <div className="plugin-row-actions">
-          <span className={`plugin-state ${plugin.status === 'missing' ? 'error' : plugin.active ? 'active' : ''}`}>{stateLabel}</span>
+          <div className="plugin-active-control">
+            <button
+              className="plugin-active-toggle"
+              type="button"
+              role="switch"
+              aria-checked={plugin.active}
+              aria-label={`${plugin.active ? '停用' : '启用'} ${plugin.name}`}
+              title={plugin.toggleable ? `${plugin.active ? '停用' : '启用'}插件（重启 Harness 后生效）` : stateLabel}
+              disabled={operating || !plugin.toggleable || plugin.status === 'missing'}
+              onClick={() => void setActive(plugin.name, !plugin.active)}
+            >
+              <span className="plugin-toggle-track" aria-hidden="true"><span /></span>
+            </button>
+            <span className={`plugin-state ${plugin.status === 'missing' ? 'error' : plugin.active ? 'active' : ''}`}>{stateLabel}</span>
+          </div>
           {plugin.removable ? confirming ? (
             <div className="plugin-remove-confirmation">
               <button className="compact-button subtle" type="button" disabled={operating} onClick={() => setRemoveConfirmation(undefined)}>取消</button>
@@ -534,16 +558,18 @@ function PluginManager({
           <div className="plugin-install-fields">
             <input value={source} type="text" autoComplete="off" spellCheck="false" placeholder="例如 @scope/plugin 或 https://github.com/…" disabled={operating} onChange={(event) => setSource(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void install() }} />
             <button className="compact-button plugin-folder-button" type="button" disabled={operating} onClick={() => void chooseLocal()}><FolderOpen /><span>本地目录</span></button>
-            <button className="dialog-button primary plugin-install-button" type="button" disabled={operating || !harnessReady || selectedProfile.length === 0 || source.trim().length === 0} onClick={() => void install()}><Plus />{operating ? '处理中…' : '添加'}</button>
+            <button className="dialog-button primary plugin-install-button" type="button" disabled={operating || !harnessReady || selectedProfile.length === 0 || source.trim().length === 0} onClick={() => void install()}><Plus />{installing ? '处理中…' : '添加'}</button>
           </div>
           {!harnessReady ? <p className="plugin-inline-note">Harness 就绪后可安装或移除；当前仍可查看已有插件。</p> : null}
         </section>
 
-        {restartRequired ? <div className="plugin-restart-notice"><span>插件配置已改变，重启 Harness 后生效。</span><button type="button" disabled={operating || restarting} onClick={() => void restart()}>{restarting ? '正在重启…' : '立即重启'}</button></div> : null}
         {error ? <p className="plugin-error">{error}</p> : null}
         {lastResult ? <details className={`plugin-command-result${lastResult.exitCode === 0 ? '' : ' error'}`}><summary>{lastResult.exitCode === 0 ? '命令执行完成' : '查看失败输出'}<code>{lastResult.command}</code></summary><pre>{lastResult.output}</pre></details> : null}
 
         <div className="plugin-list-toolbar">
+          <div className="plugin-restart-slot">
+            {restartRequired ? <div className="plugin-restart-inline"><span>配置待重启生效</span><button type="button" disabled={operating || restarting} onClick={() => void restart()}>{restarting ? '正在重启…' : '立即重启'}</button></div> : null}
+          </div>
           <div className="plugin-search"><Search aria-hidden="true" /><input value={query} type="search" placeholder="搜索名称、说明或来源" onChange={(event) => setQuery(event.target.value)} /></div>
         </div>
 

@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { spawn, type ChildProcessByStdio } from 'node:child_process'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Readable } from 'node:stream'
 import type { HarnessRuntimeCandidate } from './harness-runtime.js'
@@ -58,6 +59,7 @@ export class HarnessProcess extends EventEmitter {
   private stopping = false
   private activeCandidate: HarnessRuntimeCandidate | undefined
   private activeEnvironment: NodeJS.ProcessEnv | undefined
+  private activePnpmEntry: string | undefined
 
   constructor(
     private readonly electronExecutable: string,
@@ -119,6 +121,7 @@ export class HarnessProcess extends EventEmitter {
       await this.waitForHealthy(url, child)
       this.activeCandidate = candidate
       this.activeEnvironment = environment
+      this.activePnpmEntry = toolchain.pnpmEntry
       return { candidate, url }
     } catch (error) {
       const failure = parsePluginInitializationFailure(startupOutput)
@@ -137,13 +140,30 @@ export class HarnessProcess extends EventEmitter {
     return await this.runHarnessCommand(candidate, ['plugin', '--profile', profile, ...args], environment)
   }
 
+  async runPnpm(profile: string, args: string[]): Promise<HarnessCommandResult> {
+    const pnpmEntry = this.activePnpmEntry
+    const environment = this.activeEnvironment
+    if (pnpmEntry === undefined || environment === undefined) throw new Error('Harness 尚未启动，无法运行 pnpm。')
+    const configuredHome = environment.DSH_HOME?.trim()
+    const harnessHome = configuredHome === undefined || configuredHome.length === 0
+      ? join(this.workspacePath, '.dsh')
+      : configuredHome
+    return await this.runElectronNodeCommand(
+      pnpmEntry,
+      ['--config.minimum-release-age=0', ...args],
+      join(harnessHome, 'profiles', profile),
+      environment,
+    )
+  }
+
   async stop(): Promise<void> {
     const child = this.child
-    if (child === undefined) return
     this.stopping = true
     this.child = undefined
     this.activeCandidate = undefined
     this.activeEnvironment = undefined
+    this.activePnpmEntry = undefined
+    if (child === undefined) return
     if (child.exitCode !== null || child.signalCode !== null) return
     child.kill('SIGTERM')
     await Promise.race([
@@ -167,6 +187,35 @@ export class HarnessProcess extends EventEmitter {
           ...environment,
           DSH_DESKTOP: '1',
           DSH_DESKTOP_DIRECTORY_PICKER_URL: this.directoryPickerUrl,
+          ELECTRON_RUN_AS_NODE: '1',
+          ELECTRON_NO_ATTACH_CONSOLE: '1',
+          FORCE_COLOR: '0',
+        },
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      let stdout = ''
+      let stderr = ''
+      child.stdout.on('data', (chunk: Buffer) => { stdout = `${stdout}${chunk.toString('utf8')}`.slice(-200_000) })
+      child.stderr.on('data', (chunk: Buffer) => { stderr = `${stderr}${chunk.toString('utf8')}`.slice(-200_000) })
+      child.once('error', reject)
+      child.once('exit', (code, signal) => {
+        resolve({ exitCode: code ?? (signal === null ? -1 : 1), stdout, stderr })
+      })
+    })
+  }
+
+  private runElectronNodeCommand(
+    entryPath: string,
+    args: string[],
+    cwd: string,
+    environment: NodeJS.ProcessEnv,
+  ): Promise<HarnessCommandResult> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(this.electronExecutable, [entryPath, ...args], {
+        cwd,
+        env: {
+          ...environment,
           ELECTRON_RUN_AS_NODE: '1',
           ELECTRON_NO_ATTACH_CONSOLE: '1',
           FORCE_COLOR: '0',
