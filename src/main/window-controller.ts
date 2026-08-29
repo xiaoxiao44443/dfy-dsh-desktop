@@ -360,7 +360,12 @@ export class WindowController {
       void this.detectHarnessPluginFailure()
     })
     ipcMain.handle('desktop:title-menu-action', (_event, action: TitleMenuAction) => this.titleMenuAction(action))
-    ipcMain.handle('desktop:check-update', () => this.runtime.checkForUpdates())
+    ipcMain.handle('desktop:check-update', () => this.runtime.checkForUpdates({ download: false }))
+    ipcMain.handle('desktop:install-update-version', (_event, version: string) => this.runtime.installHarnessVersion(version))
+    ipcMain.handle('desktop:open-harness-release', async (event, version: string) => {
+      if (event.sender !== this.window?.webContents) return
+      await shell.openExternal(resolveHarnessReleaseUrl(version))
+    })
     ipcMain.handle('desktop:restart-update', () => {
       if (this.runtime.updateState.status !== 'ready') return
       app.relaunch()
@@ -369,6 +374,16 @@ export class WindowController {
     ipcMain.handle('desktop:development-choose-patch', () => this.development.choosePatch())
     ipcMain.handle('desktop:development-clear-patch', () => this.development.clearPatch())
     ipcMain.handle('desktop:development-restart', () => this.development.restartHarness())
+    ipcMain.handle('desktop:development-copy-harness-url', (event) => {
+      if (event.sender !== this.window?.webContents) return
+      if (this.harnessUrl === undefined) throw new Error('Harness 尚未启动。')
+      clipboard.writeText(this.harnessUrl)
+    })
+    ipcMain.handle('desktop:development-open-harness-url', async (event) => {
+      if (event.sender !== this.window?.webContents) return
+      if (this.harnessUrl === undefined) throw new Error('Harness 尚未启动。')
+      await shell.openExternal(this.harnessUrl)
+    })
     ipcMain.handle('desktop:development-cli-enabled', (event, enabled: boolean) => {
       if (event.sender !== this.window?.webContents || typeof enabled !== 'boolean') return
       return this.development.setCliEnabled(enabled)
@@ -414,6 +429,8 @@ export class WindowController {
             ...(this.harnessVersion === undefined ? {} : { harnessVersion: this.harnessVersion }),
             updateStatus: this.runtime.updateState.status,
             ...(this.runtime.updateState.version === undefined ? {} : { updateVersion: this.runtime.updateState.version }),
+            ...(this.runtime.updateState.latestVersion === undefined ? {} : { updateLatestVersion: this.runtime.updateState.latestVersion }),
+            ...(this.runtime.updateState.progress === undefined ? {} : { updateProgress: this.runtime.updateState.progress }),
             patchEnabled: Boolean(this.development.state.patchPath),
           }
         : undefined
@@ -865,7 +882,7 @@ export class WindowController {
         app.relaunch()
         app.quit()
       } else {
-        await this.runtime.checkForUpdates()
+        await this.runtime.checkForUpdates({ download: false })
       }
     } else if (action === 'open-changes') {
       await shell.openExternal(resolveHarnessReleaseUrl(this.harnessVersion))
@@ -873,10 +890,6 @@ export class WindowController {
   }
 
   private async handleApplicationMenuAction(action: DesktopApplicationMenuAction): Promise<void> {
-    if (action === 'update') {
-      await this.titleMenuAction('update')
-      return
-    }
     await this.browser?.setPanelOpen(false)
     const window = this.window
     if (window === undefined || window.isDestroyed() || window.webContents.isDestroyed()) return
@@ -885,6 +898,7 @@ export class WindowController {
 
   private getState(): DesktopState {
     const update = this.runtime.updateState
+    const updateVersions = update.versions ?? []
     return {
       appVersion: app.getVersion(),
       platform: this.desktopPlatform(),
@@ -901,6 +915,9 @@ export class WindowController {
       disabledPlugins: this.pluginRecovery?.disabledPlugins ?? [],
       updateStatus: update.status,
       ...(update.version !== undefined ? { updateVersion: update.version } : {}),
+      ...(update.latestVersion !== undefined ? { updateLatestVersion: update.latestVersion } : {}),
+      ...(updateVersions.length === 0 ? {} : { updateVersions }),
+      ...(update.progress !== undefined ? { updateProgress: update.progress } : {}),
       ...(update.message !== undefined ? { updateMessage: update.message } : {}),
       development: this.development.state,
       browser: this.browser?.state ?? {

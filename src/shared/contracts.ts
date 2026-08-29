@@ -6,6 +6,11 @@ export type DesktopPlatform = 'windows' | 'macos' | 'linux'
 
 export type HarnessUpdateStatus = 'idle' | 'checking' | 'available' | 'downloading' | 'ready' | 'current' | 'error'
 
+export interface HarnessReleaseVersion {
+  version: string
+  publishedAt?: string
+}
+
 export type DevelopmentCliStatus =
   | 'enabled'
   | 'disabled'
@@ -101,6 +106,8 @@ export interface DesktopApplicationMenuState {
   harnessVersion?: string
   updateStatus: HarnessUpdateStatus
   updateVersion?: string
+  updateLatestVersion?: string
+  updateProgress?: number
   patchEnabled: boolean
 }
 
@@ -221,6 +228,9 @@ export interface DesktopState {
   disabledPlugins: PluginRecoveryEntry[]
   updateStatus: HarnessUpdateStatus
   updateVersion?: string
+  updateLatestVersion?: string
+  updateVersions?: HarnessReleaseVersion[]
+  updateProgress?: number
   updateMessage?: string
   development: DevelopmentState
   browser: DesktopBrowserState
@@ -236,10 +246,14 @@ export interface DesktopBridge {
   reportHarnessFrameLoaded(url: string): Promise<void>
   titleMenuAction(action: TitleMenuAction): Promise<void>
   checkForHarnessUpdate(): Promise<void>
+  installHarnessVersion(version: string): Promise<void>
+  openHarnessRelease(version: string): Promise<void>
   restartToApplyUpdate(): Promise<void>
   chooseDevelopmentPatch(): Promise<void>
   clearDevelopmentPatch(): Promise<void>
   restartHarnessForDevelopment(): Promise<void>
+  copyDevelopmentHarnessUrl(): Promise<void>
+  openDevelopmentHarnessUrl(): Promise<void>
   setDevelopmentCliEnabled(enabled: boolean): Promise<void>
   recoverFailedPlugin(): Promise<void>
   restoreRecoveredPlugin(entryId: string): Promise<void>

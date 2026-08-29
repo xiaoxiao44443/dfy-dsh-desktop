@@ -179,15 +179,33 @@ describe('Harness runtime update policy', () => {
       ;(manager as unknown as { installVersion: typeof installVersion }).installVersion = installVersion
       vi.stubGlobal('fetch', vi.fn(async () => ({
         ok: true,
-        json: async () => ({ 'dist-tags': { latest: '0.1.0-rc.9' } }),
+        json: async () => ({
+          'dist-tags': { latest: '0.1.0-rc.9' },
+          versions: {
+            '0.1.0-rc.7': {},
+            '0.1.0-rc.8': {},
+            '0.1.0-rc.9': {},
+          },
+          time: {
+            '0.1.0-rc.7': '2026-08-17T00:00:00.000Z',
+            '0.1.0-rc.8': '2026-08-18T00:00:00.000Z',
+            '0.1.0-rc.9': '2026-08-19T00:00:00.000Z',
+          },
+        }),
       })))
 
       await manager.checkForUpdates({ download: false })
 
-      expect(manager.updateState).toEqual({
+      expect(manager.updateState).toMatchObject({
         status: 'available',
         version: '0.1.0-rc.9',
-        message: '发现新版本，点击更新后下载',
+        latestVersion: '0.1.0-rc.9',
+        versions: [
+          { version: '0.1.0-rc.9', publishedAt: '2026-08-19T00:00:00.000Z' },
+          { version: '0.1.0-rc.8', publishedAt: '2026-08-18T00:00:00.000Z' },
+          { version: '0.1.0-rc.7', publishedAt: '2026-08-17T00:00:00.000Z' },
+        ],
+        message: '发现新版本，可选择版本下载安装',
       })
       expect(installVersion).not.toHaveBeenCalled()
       let state = JSON.parse(await readFile(join(userData, 'harness-runtime', 'state.json'), 'utf8')) as {
@@ -197,12 +215,61 @@ describe('Harness runtime update policy', () => {
 
       await manager.checkForUpdates()
 
-      expect(installVersion).toHaveBeenCalledWith('0.1.0-rc.9')
+      expect(installVersion).toHaveBeenCalledWith('0.1.0-rc.9', expect.any(Function))
       expect(manager.updateState).toMatchObject({ status: 'ready', version: '0.1.0-rc.9' })
       state = JSON.parse(await readFile(join(userData, 'harness-runtime', 'state.json'), 'utf8')) as {
         pendingVersion?: string
       }
       expect(state.pendingVersion).toBe('0.1.0-rc.9')
+    } finally {
+      vi.unstubAllGlobals()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps an explicitly selected older managed version active across later launches', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-runtime-version-selection-'))
+    try {
+      const userData = join(root, 'user-data')
+      const bundledRoot = join(root, 'bundled')
+      await writeRuntimeFixture(bundledRoot, '0.1.0-rc.8')
+      const manager = new HarnessRuntimeManager(userData, process.execPath, bundledRoot)
+      await manager.initialize()
+      ;(manager as unknown as { installVersion: (version: string, onProgress: (progress: number, message: string) => void) => Promise<void> }).installVersion = async (version, onProgress) => {
+        onProgress(82, '下载完成，正在检查运行时文件…')
+        await writeRuntimeFixture(join(userData, 'harness-runtime', 'versions', version), version)
+      }
+      vi.stubGlobal('fetch', vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          'dist-tags': { latest: '0.1.0-rc.9' },
+          versions: {
+            '0.1.0-rc.7': {},
+            '0.1.0-rc.8': {},
+            '0.1.0-rc.9': {},
+          },
+        }),
+      })))
+
+      await manager.checkForUpdates({ download: false })
+      await manager.installHarnessVersion('0.1.0-rc.7')
+
+      expect(manager.updateState).toMatchObject({
+        status: 'ready',
+        version: '0.1.0-rc.7',
+        progress: 100,
+      })
+
+      const restarted = new HarnessRuntimeManager(userData, process.execPath, bundledRoot)
+      await restarted.initialize()
+      let candidates = await restarted.launchCandidates()
+      expect(candidates[0]).toMatchObject({ version: '0.1.0-rc.7', source: 'managed', pending: true })
+      await restarted.markHealthy(candidates[0])
+
+      const launchedAgain = new HarnessRuntimeManager(userData, process.execPath, bundledRoot)
+      await launchedAgain.initialize()
+      candidates = await launchedAgain.launchCandidates()
+      expect(candidates[0]).toMatchObject({ version: '0.1.0-rc.7', source: 'managed', pending: false })
     } finally {
       vi.unstubAllGlobals()
       await rm(root, { recursive: true, force: true })

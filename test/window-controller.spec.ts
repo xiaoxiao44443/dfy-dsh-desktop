@@ -5,6 +5,7 @@ const electronMocks = vi.hoisted(() => ({
   clipboardImage: { isEmpty: () => false },
   clipboardWriteImage: vi.fn(),
   clipboardWriteText: vi.fn(),
+  shellOpenExternal: vi.fn(),
   nativeImageCreateFromDataURL: vi.fn(),
   ipcHandlers: new Map<string, (...args: unknown[]) => unknown>(),
   window: undefined as undefined | {
@@ -87,7 +88,7 @@ vi.mock('electron', async () => {
     nativeImage: {
       createFromDataURL: electronMocks.nativeImageCreateFromDataURL.mockReturnValue(electronMocks.clipboardImage),
     },
-    shell: { openExternal: vi.fn() },
+    shell: { openExternal: electronMocks.shellOpenExternal },
   }
 })
 
@@ -132,6 +133,41 @@ describe('Harness release URL', () => {
 })
 
 describe('WindowController Harness reload', () => {
+  it('checks metadata without downloading and installs only the selected Harness version', async () => {
+    const checkForUpdates = vi.fn(async () => undefined)
+    const installHarnessVersion = vi.fn(async () => undefined)
+    const runtime = Object.assign(new EventEmitter(), {
+      harnessHome: '/path/that/does/not/exist',
+      updateState: { status: 'idle', versions: [] },
+      checkForUpdates,
+      installHarnessVersion,
+    })
+    const development = Object.assign(new EventEmitter(), {
+      state: { pnpmVersion: '11.19.0', restarting: false, commandRunning: false },
+      choosePatch: vi.fn(),
+      clearPatch: vi.fn(),
+      restartHarness: vi.fn(),
+      runPlugin: vi.fn(),
+    })
+    const controller = new WindowController(runtime as never, development as never)
+    await controller.create()
+
+    await electronMocks.ipcHandlers.get('desktop:check-update')?.({})
+    await electronMocks.ipcHandlers.get('desktop:install-update-version')?.({}, '0.1.1-rc.1')
+    if (electronMocks.window !== undefined) {
+      await electronMocks.ipcHandlers.get('desktop:open-harness-release')?.(
+        { sender: electronMocks.window.webContents },
+        '0.1.1-rc.1',
+      )
+    }
+
+    expect(checkForUpdates).toHaveBeenCalledWith({ download: false })
+    expect(installHarnessVersion).toHaveBeenCalledWith('0.1.1-rc.1')
+    expect(electronMocks.shellOpenExternal).toHaveBeenCalledWith(
+      'https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.1-rc.1',
+    )
+  })
+
   it('publishes bundled runtime extraction progress only during preparation', async () => {
     const runtime = Object.assign(new EventEmitter(), {
       harnessHome: '/path/that/does/not/exist',
@@ -190,6 +226,17 @@ describe('WindowController Harness reload', () => {
     expect(firstStartingState).toMatchObject({ harnessLoadId: 1, harnessLifecycle: 'starting' })
     window?.webContents.emit('did-frame-navigate', {}, url, 200, 'OK', false)
     await firstLoad
+
+    const copyHarnessUrl = electronMocks.ipcHandlers.get('desktop:development-copy-harness-url')
+    const openHarnessUrl = electronMocks.ipcHandlers.get('desktop:development-open-harness-url')
+    expect(copyHarnessUrl).toBeDefined()
+    expect(openHarnessUrl).toBeDefined()
+    if (window !== undefined) {
+      await copyHarnessUrl?.({ sender: window.webContents })
+      await openHarnessUrl?.({ sender: window.webContents })
+    }
+    expect(electronMocks.clipboardWriteText).toHaveBeenCalledWith(url)
+    expect(electronMocks.shellOpenExternal).toHaveBeenCalledWith(url)
 
     const secondLoad = controller.showHarness(url, '0.1.0')
     const secondStartingState = window?.webContents.send.mock.calls.at(-1)?.[1]

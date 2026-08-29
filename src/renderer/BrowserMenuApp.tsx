@@ -160,13 +160,14 @@ function ApplicationMenu({ payload }: { payload: BrowserMenuWindowPayload }): Re
   const application = payload.application
   if (application === undefined) return null
   const status = application.updateStatus
-  const updateTitle = status === 'ready' ? '重启并应用更新'
-    : status === 'available' ? '下载 Harness 更新'
-    : status === 'checking' ? '正在检查更新…'
-      : status === 'downloading' ? '正在下载更新…'
-        : status === 'error' ? '重新检查更新'
-          : '检查 Harness 更新'
-  const updateMeta = status === 'current' ? '已是最新' : status === 'error' ? '上次失败' : application.updateVersion ?? ''
+  const updateTitle = 'Harness 更新'
+  const updateMeta = status === 'ready' ? `待应用 ${application.updateVersion ?? ''}`.trim()
+    : status === 'available' ? `最新 ${application.updateLatestVersion ?? application.updateVersion ?? ''}`.trim()
+      : status === 'checking' ? '正在检查…'
+        : status === 'downloading' ? `下载 ${application.updateProgress ?? 0}%`
+          : status === 'current' ? '已是最新'
+            : status === 'error' ? '检查失败'
+              : '版本与下载'
   const updateDot = status === 'current' || status === 'ready' ? 'ready'
     : status === 'available' ? 'available'
     : status === 'checking' || status === 'downloading' ? 'busy'
@@ -182,7 +183,7 @@ function ApplicationMenu({ payload }: { payload: BrowserMenuWindowPayload }): Re
       <div className="application-list">
         {item('开发工具', application.patchEnabled ? 'Patch 已启用' : 'Patch 与 CLI', 'development')}
         {item('插件管理', 'Profile 与来源', 'plugins')}
-        {item(updateTitle, updateMeta, 'update', status === 'checking' || status === 'downloading', updateDot)}
+        {item(updateTitle, updateMeta, 'update', false, updateDot)}
         {item('版本说明与变更记录', application.harnessVersion ?? '尚未启动', 'release-notes')}
       </div>
       <footer className="application-footer"><span>桌面端版本</span><span>{application.appVersion}</span></footer>

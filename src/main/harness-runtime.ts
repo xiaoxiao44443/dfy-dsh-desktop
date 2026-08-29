@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process'
 import { pipeline } from 'node:stream/promises'
 import semver from 'semver'
 import { x as extractTar } from 'tar'
-import type { HarnessUpdateStatus } from '../shared/contracts.js'
+import type { HarnessReleaseVersion, HarnessUpdateStatus } from '../shared/contracts.js'
 import { readRuntimeState, writeRuntimeState, type HarnessRuntimeState } from './runtime-state.js'
 import { applyHarnessRuntimeCompatibility } from './runtime-compat.js'
 
@@ -19,6 +19,7 @@ export const DESKTOP_KOFFI_VERSION = '3.1.6'
 const BUNDLED_RUNTIME_POLICY_VERSION = 6
 const REGISTRY_METADATA = 'https://registry.npmjs.org/@deepseek-ai%2Fdsh'
 const UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000
+const RECENT_HARNESS_VERSION_LIMIT = 6
 export const RUNTIME_PREPARATION_PROGRESS_EVENT = 'prepare-progress'
 const INSTALL_SCRIPT_POLICY = {
   '@deepseek-ai/dsh-subprocess-local': true,
@@ -38,11 +39,21 @@ export interface HarnessRuntimeCandidate {
 export interface RuntimeUpdateView {
   status: HarnessUpdateStatus
   version?: string
+  latestVersion?: string
+  versions: HarnessReleaseVersion[]
+  progress?: number
   message?: string
 }
 
 interface RegistryMetadata {
   'dist-tags'?: Record<string, string>
+  versions?: Record<string, unknown>
+  time?: Record<string, string>
+}
+
+interface RegistryCatalog {
+  latestVersion: string
+  versions: HarnessReleaseVersion[]
 }
 
 export function bundledArchiveProgress(bytesRead: number, totalBytes: number): number {
@@ -103,7 +114,7 @@ export class HarnessRuntimeManager extends EventEmitter {
   private readonly legacyNpmCache: string
   private state: HarnessRuntimeState | undefined
   private bundled: HarnessRuntimeCandidate | undefined
-  private updateView: RuntimeUpdateView = { status: 'idle' }
+  private updateView: RuntimeUpdateView = { status: 'idle', versions: [] }
   private updatePromise: Promise<void> | undefined
   private downloadRequested = false
   private updateTimer: NodeJS.Timeout | undefined
@@ -144,7 +155,7 @@ export class HarnessRuntimeManager extends EventEmitter {
   }
 
   get updateState(): RuntimeUpdateView {
-    return { ...this.updateView }
+    return { ...this.updateView, versions: this.updateView.versions.map((entry) => ({ ...entry })) }
   }
 
   async launchCandidates(): Promise<HarnessRuntimeCandidate[]> {
@@ -160,8 +171,7 @@ export class HarnessRuntimeManager extends EventEmitter {
     if (state.activeVersion !== undefined && state.badVersions[state.activeVersion] === undefined) {
       const active = this.managedCandidate(state.activeVersion, false)
       if (
-        semver.gte(active.version, bundled.version)
-        && await this.isCandidatePresent(active)
+        await this.isCandidatePresent(active)
         && !candidates.some((candidate) => candidate.version === active.version)
       ) {
         candidates.push(active)
@@ -226,58 +236,185 @@ export class HarnessRuntimeManager extends EventEmitter {
     return this.updatePromise
   }
 
+  installHarnessVersion(version: string): Promise<void> {
+    const normalizedVersion = semver.valid(version)
+    if (normalizedVersion === null || normalizedVersion !== version) {
+      return Promise.reject(new Error('请选择有效的 Harness 版本。'))
+    }
+    if (this.updatePromise !== undefined) {
+      return Promise.reject(new Error('另一项 Harness 更新操作正在进行。'))
+    }
+    this.updatePromise = this.performVersionSelection(version).finally(() => {
+      this.updatePromise = undefined
+      this.downloadRequested = false
+    })
+    return this.updatePromise
+  }
+
   private async performUpdateCheck(): Promise<void> {
-    this.setUpdateView({ status: 'checking' })
+    this.setUpdateView({ ...this.updateView, status: 'checking', progress: 0, message: '正在获取版本信息…' })
     try {
-      const response = await fetch(REGISTRY_METADATA, {
-        headers: { accept: 'application/json' },
-        signal: AbortSignal.timeout(20_000),
-      })
-      if (!response.ok) throw new Error(`npm registry returned HTTP ${response.status}`)
-      const metadata = await response.json() as RegistryMetadata
-      const targetVersion = metadata['dist-tags']?.latest
-      if (targetVersion === undefined || semver.valid(targetVersion) === null) {
-        throw new Error('npm registry did not return a valid latest version')
-      }
+      const catalog = await this.fetchRegistryCatalog()
+      const targetVersion = catalog.latestVersion
 
       const state = this.mustState()
       state.lastCheckAt = new Date().toISOString()
-      const currentVersions = [this.mustBundled().version, state.activeVersion, state.pendingVersion]
-        .filter((value): value is string => value !== undefined && semver.valid(value) !== null)
-      const currentVersion = currentVersions.sort(semver.rcompare)[0] ?? this.mustBundled().version
+      const currentVersion = state.activeVersion ?? this.mustBundled().version
 
-      if (!semver.gt(targetVersion, currentVersion)) {
-        await this.persistState()
-        this.setUpdateView({ status: 'current', version: currentVersion })
+      if (this.downloadRequested) {
+        await this.performVersionInstall(targetVersion, catalog)
         return
       }
 
-      if (!this.downloadRequested) {
+      if (state.pendingVersion !== undefined) {
         await this.persistState()
         this.setUpdateView({
-          status: 'available',
-          version: targetVersion,
-          message: '发现新版本，点击更新后下载',
+          status: 'ready',
+          version: state.pendingVersion,
+          latestVersion: targetVersion,
+          versions: catalog.versions,
+          progress: 100,
+          message: '版本已准备好，重启桌面应用后生效',
         })
         return
       }
 
-      this.setUpdateView({ status: 'downloading', version: targetVersion })
-      await this.installVersion(targetVersion)
-      state.pendingVersion = targetVersion
-      delete state.badVersions[targetVersion]
+      if (!semver.gt(targetVersion, currentVersion)) {
+        await this.persistState()
+        this.setUpdateView({
+          status: 'current',
+          version: currentVersion,
+          latestVersion: targetVersion,
+          versions: catalog.versions,
+          progress: 100,
+          message: semver.gt(currentVersion, targetVersion) ? '当前版本高于 latest 版本' : '当前已是最新版本',
+        })
+        return
+      }
+
       await this.persistState()
-      this.setUpdateView({ status: 'ready', version: targetVersion, message: '已下载，点击重启后应用' })
+      this.setUpdateView({
+        status: 'available',
+        version: targetVersion,
+        latestVersion: targetVersion,
+        versions: catalog.versions,
+        progress: 0,
+        message: '发现新版本，可选择版本下载安装',
+      })
     } catch (error) {
-      this.setUpdateView({ status: 'error', message: error instanceof Error ? error.message : String(error) })
+      this.setUpdateView({
+        ...this.updateView,
+        status: 'error',
+        message: error instanceof Error ? error.message : String(error),
+      })
     }
   }
 
-  private async installVersion(version: string): Promise<void> {
+  private async performVersionSelection(version: string): Promise<void> {
+    let catalog: RegistryCatalog | undefined
+    try {
+      catalog = this.updateView.versions.some((entry) => entry.version === version)
+        && this.updateView.latestVersion !== undefined
+        ? { latestVersion: this.updateView.latestVersion, versions: this.updateView.versions }
+        : await this.fetchRegistryCatalog()
+      if (!catalog.versions.some((entry) => entry.version === version)) {
+        throw new Error(`Harness ${version} 不在可安装的近期版本列表中。`)
+      }
+      await this.performVersionInstall(version, catalog)
+    } catch (error) {
+      this.setUpdateView({
+        status: 'error',
+        version,
+        ...(catalog === undefined ? {} : { latestVersion: catalog.latestVersion }),
+        versions: catalog?.versions ?? this.updateView.versions,
+        message: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  private async performVersionInstall(version: string, catalog: RegistryCatalog): Promise<void> {
+    const state = this.mustState()
+    const currentVersion = state.activeVersion ?? this.mustBundled().version
+    if (version === currentVersion && state.pendingVersion === undefined) {
+      this.setUpdateView({
+        status: 'current',
+        version,
+        latestVersion: catalog.latestVersion,
+        versions: catalog.versions,
+        progress: 100,
+        message: '当前正在使用这个版本',
+      })
+      return
+    }
+
+    const publishProgress = (progress: number, message: string): void => {
+      this.setUpdateView({
+        status: 'downloading',
+        version,
+        latestVersion: catalog.latestVersion,
+        versions: catalog.versions,
+        progress,
+        message,
+      })
+    }
+
+    if (version === this.mustBundled().version) {
+      publishProgress(90, '正在切换到桌面端内置版本…')
+      delete state.activeVersion
+      delete state.pendingVersion
+    } else {
+      await this.installVersion(version, publishProgress)
+      state.pendingVersion = version
+      delete state.badVersions[version]
+    }
+    await this.persistState()
+    this.setUpdateView({
+      status: 'ready',
+      version,
+      latestVersion: catalog.latestVersion,
+      versions: catalog.versions,
+      progress: 100,
+      message: '版本已准备好，重启桌面应用后生效',
+    })
+  }
+
+  private async fetchRegistryCatalog(): Promise<RegistryCatalog> {
+    const response = await fetch(REGISTRY_METADATA, {
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(20_000),
+    })
+    if (!response.ok) throw new Error(`npm registry returned HTTP ${response.status}`)
+    const metadata = await response.json() as RegistryMetadata
+    const latestVersion = metadata['dist-tags']?.latest
+    if (latestVersion === undefined || semver.valid(latestVersion) === null) {
+      throw new Error('npm registry did not return a valid latest version')
+    }
+    const availableVersions = new Set(Object.keys(metadata.versions ?? {}).filter((version) => semver.valid(version) !== null))
+    availableVersions.add(latestVersion)
+    const versions = [...availableVersions]
+      .sort((left, right) => {
+        const leftTime = Date.parse(metadata.time?.[left] ?? '')
+        const rightTime = Date.parse(metadata.time?.[right] ?? '')
+        if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) return rightTime - leftTime
+        return semver.rcompare(left, right)
+      })
+      .slice(0, RECENT_HARNESS_VERSION_LIMIT)
+      .map((version) => ({
+        version,
+        ...(metadata.time?.[version] === undefined ? {} : { publishedAt: metadata.time[version] }),
+      }))
+    return { latestVersion, versions }
+  }
+
+  private async installVersion(version: string, onProgress: (progress: number, message: string) => void = () => undefined): Promise<void> {
     const finalPath = join(this.versionsRoot, version)
-    if (await this.isCandidatePresent(this.managedCandidate(version, true))) return
+    if (await this.isCandidatePresent(this.managedCandidate(version, true))) {
+      onProgress(88, '该版本已下载，正在准备切换…')
+      return
+    }
 
     const stagingPath = join(this.stagingRoot, `${version}-${Date.now()}-${process.pid}`)
+    onProgress(5, '正在准备下载目录…')
     await mkdir(stagingPath, { recursive: true })
     try {
       await this.resetPackageStore()
@@ -296,18 +433,22 @@ export class HarnessRuntimeManager extends EventEmitter {
         ...Object.entries(INSTALL_SCRIPT_POLICY).map(([name, allowed]) => `  ${JSON.stringify(name)}: ${String(allowed)}`),
         '',
       ].join('\n'), 'utf8')
+      onProgress(18, '正在通过内置 pnpm 下载并安装…')
       await this.runNode(this.resolvePnpmCli(), [
         'install', '--dir', stagingPath, '--prod', '--no-lockfile', '--prefer-offline',
         '--store-dir', this.packageStore, '--package-import-method', 'copy',
         '--config.node-linker=hoisted',
       ])
+      onProgress(82, '下载完成，正在检查运行时文件…')
       const stagedEntry = join(stagingPath, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
       const stagedPnpmEntry = join(stagingPath, 'node_modules', 'pnpm', 'bin', 'pnpm.cjs')
       await Promise.all([access(stagedEntry), access(stagedPnpmEntry)])
       await applyHarnessRuntimeCompatibility(stagedEntry)
+      onProgress(92, '正在验证 Harness 版本…')
       await this.runNode(stagedEntry, ['--version'])
       await rm(finalPath, { recursive: true, force: true })
       await rename(stagingPath, finalPath)
+      onProgress(98, '正在保存已下载版本…')
     } catch (error) {
       await rm(stagingPath, { recursive: true, force: true })
       throw error
@@ -447,7 +588,7 @@ export class HarnessRuntimeManager extends EventEmitter {
       const version = state[key]
       if (version === undefined) continue
       const usableManagedRuntime = semver.valid(version) !== null
-        && semver.gt(version, bundled.version)
+        && version !== bundled.version
         && state.badVersions[version] === undefined
         && await this.isCandidatePresent(this.managedCandidate(version, key === 'pendingVersion'))
       if (usableManagedRuntime) {
@@ -525,7 +666,7 @@ export class HarnessRuntimeManager extends EventEmitter {
   }
 
   private setUpdateView(view: RuntimeUpdateView): void {
-    this.updateView = view
+    this.updateView = { ...view, versions: view.versions.map((entry) => ({ ...entry })) }
     this.emit('update-state', this.updateState)
   }
 }

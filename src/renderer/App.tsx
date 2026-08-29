@@ -1,7 +1,7 @@
-import { ArrowLeft, ArrowRight, Check, ChevronDown, Code2, Columns2, Copy, FolderOpen, Globe2, History, Maximize2, Minimize2, Minus, MonitorSmartphone, MoreVertical, PanelRight, Plus, Puzzle, RotateCw, Search, Square, TabletSmartphone, Trash2, X } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Check, ChevronDown, Code2, Columns2, Copy, Download, FolderOpen, Globe2, History, Maximize2, Minimize2, Minus, MonitorSmartphone, MoreVertical, PanelRight, Plus, Puzzle, RotateCw, Search, Square, TabletSmartphone, Trash2, X } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { BrowserDisplayMode, DesktopApplicationMenuAction, DesktopBrowserHistoryEntry, DesktopBrowserShellSnapshot, DesktopBrowserViewport, DesktopState, DevelopmentState, ManagedPluginEntry, PluginInventory, PluginMutationResult, PluginRecoveryEntry, PluginSourceType, TitleMenuAction } from '../shared/contracts.js'
+import type { BrowserDisplayMode, DesktopApplicationMenuAction, DesktopBrowserHistoryEntry, DesktopBrowserShellSnapshot, DesktopBrowserViewport, DesktopState, DevelopmentState, ManagedPluginEntry, PluginInventory, PluginMutationResult, PluginRecoveryEntry, PluginSourceType } from '../shared/contracts.js'
 import type { DesktopContextMenuRequest } from '../shared/context-menu.js'
 import { AgentPointerIcon } from './AgentPointerIcon.js'
 import { ContextMenu } from './ContextMenu.js'
@@ -64,30 +64,37 @@ function updatePresentation(state: DesktopState): {
   disabled: boolean
 } {
   const result = {
-    title: '检查 Harness 更新',
-    detail: '',
+    title: 'Harness 更新',
+    detail: '版本与下载',
     dotClass: 'item-dot',
-    disabled: state.updateStatus === 'checking' || state.updateStatus === 'downloading',
+    disabled: false,
   }
   if (state.updateStatus === 'ready') {
-    return { ...result, title: '重启并应用更新', detail: state.updateVersion ?? '', dotClass: 'item-dot active ready' }
+    return { ...result, detail: `待应用 ${state.updateVersion ?? ''}`.trim(), dotClass: 'item-dot active ready' }
   }
   if (state.updateStatus === 'available') {
-    return { ...result, title: '下载 Harness 更新', detail: state.updateVersion ?? '', dotClass: 'item-dot active available' }
+    return { ...result, detail: `最新 ${state.updateLatestVersion ?? state.updateVersion ?? ''}`.trim(), dotClass: 'item-dot active available' }
   }
   if (state.updateStatus === 'checking') {
-    return { ...result, title: '正在检查更新…', dotClass: 'item-dot active busy' }
+    return { ...result, detail: '正在检查…', dotClass: 'item-dot active busy' }
   }
   if (state.updateStatus === 'downloading') {
-    return { ...result, title: '正在下载更新…', detail: state.updateVersion ?? '', dotClass: 'item-dot active busy' }
+    return { ...result, detail: `下载 ${state.updateProgress ?? 0}%`, dotClass: 'item-dot active busy' }
   }
   if (state.updateStatus === 'error') {
-    return { ...result, title: '重新检查更新', detail: '上次失败', dotClass: 'item-dot active error' }
+    return { ...result, detail: '检查失败', dotClass: 'item-dot active error' }
   }
   if (state.updateStatus === 'current') {
     return { ...result, detail: '已是最新', dotClass: 'item-dot active ready' }
   }
   return result
+}
+
+function formatReleaseDate(value?: string): string | undefined {
+  if (value === undefined) return undefined
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return undefined
+  return new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(date)
 }
 
 interface ModalProps {
@@ -113,24 +120,136 @@ function Modal({ open, className = '', labelledBy, closeLabel, onClose, children
   )
 }
 
+function HarnessUpdatePanel({ open, state, onClose }: { open: boolean; state: DesktopState; onClose: () => void }): ReactNode {
+  const [actionPending, setActionPending] = useState(false)
+  const [actionError, setActionError] = useState<string>()
+  const [versionsExpanded, setVersionsExpanded] = useState(false)
+  const busy = state.updateStatus === 'checking' || state.updateStatus === 'downloading' || actionPending
+  const versions = state.updateVersions ?? []
+  const latestVersion = state.updateLatestVersion ?? (state.updateStatus === 'available' ? state.updateVersion : undefined)
+  const selectedVersion = state.updateStatus === 'ready' || state.updateStatus === 'downloading' ? state.updateVersion : undefined
+  const progress = Math.min(100, Math.max(0, state.updateProgress ?? 0))
+
+  useEffect(() => {
+    if (!open) {
+      setVersionsExpanded(false)
+      return
+    }
+    if (state.updateStatus === 'checking' || state.updateStatus === 'downloading') return
+    setActionError(undefined)
+    void desktopApi.checkForHarnessUpdate().catch((error: unknown) => {
+      setActionError(error instanceof Error ? error.message : String(error))
+    })
+  }, [open])
+
+  const install = async (version: string): Promise<void> => {
+    setActionPending(true)
+    setActionError(undefined)
+    try {
+      await desktopApi.installHarnessVersion(version)
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setActionPending(false)
+    }
+  }
+
+  const refresh = async (): Promise<void> => {
+    setActionPending(true)
+    setActionError(undefined)
+    try {
+      await desktopApi.checkForHarnessUpdate()
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setActionPending(false)
+    }
+  }
+
+  const statusTitle = state.updateStatus === 'checking' ? '正在获取版本信息'
+    : state.updateStatus === 'downloading' ? `正在准备 Harness ${state.updateVersion ?? ''}`.trim()
+      : state.updateStatus === 'ready' ? `Harness ${state.updateVersion ?? ''} 已准备好`.trim()
+        : state.updateStatus === 'available' ? '发现可用的新版本'
+          : state.updateStatus === 'current' ? '当前已是最新版本'
+            : state.updateStatus === 'error' ? '更新操作失败'
+              : '尚未检查版本'
+
+  return (
+    <Modal open={open} className="update-dialog" labelledBy="harness-update-title" closeLabel="关闭 Harness 更新" onClose={onClose}>
+      <header className="dialog-header">
+        <div className="dialog-heading"><span className="update-dialog-icon" aria-hidden="true"><Download /></span><div><h2 id="harness-update-title">Harness 更新</h2><p>查看最新版本、下载状态并选择指定版本安装</p></div></div>
+        <button className="dialog-close" type="button" aria-label="关闭 Harness 更新" title="关闭" onClick={onClose}><X /></button>
+      </header>
+      <div className="dialog-content update-content">
+        <div className="update-version-summary">
+          <section><span>当前版本</span><strong>{state.harnessVersion ?? '尚未启动'}</strong></section>
+          <section><span>latest 版本</span><strong>{latestVersion ?? (state.updateStatus === 'checking' ? '检查中…' : '—')}</strong></section>
+        </div>
+
+        <section className={`update-status-card status-${state.updateStatus}`} aria-live="polite">
+          <div className="update-status-main"><div className="update-status-copy"><strong>{statusTitle}</strong><span>{state.updateMessage ?? '版本信息来自 DeepSeek Harness npm 仓库'}</span></div>{state.updateStatus === 'available' && latestVersion !== undefined ? <div className="update-latest-actions"><button className="update-latest-link" type="button" onClick={() => void desktopApi.openHarnessRelease(latestVersion)}>更新内容</button><button className="update-latest-button" type="button" disabled={busy} onClick={() => void install(latestVersion)}>安装最新版本</button></div> : null}</div>
+          {state.updateStatus === 'downloading' ? (
+            <div className="update-progress-row"><div className="update-progress-track"><span style={{ width: `${progress}%` }} /></div><output>{progress}%</output></div>
+          ) : null}
+        </section>
+
+        {actionError ? <p className="update-error" role="alert">{actionError}</p> : null}
+
+        <section className="update-release-section">
+          <div className="update-release-heading"><button className="update-release-toggle" type="button" aria-expanded={versionsExpanded} aria-controls="harness-recent-versions" onClick={() => setVersionsExpanded((expanded) => !expanded)}><span><strong>近期版本</strong><small>选择指定版本安装</small></span><ChevronDown aria-hidden="true" /></button><button className="plugin-icon-button" type="button" aria-label={state.updateStatus === 'checking' ? '正在刷新版本列表' : '刷新版本列表'} title={state.updateStatus === 'checking' ? '正在刷新…' : '刷新'} disabled={busy} onClick={() => void refresh()}><RotateCw className={state.updateStatus === 'checking' ? 'spinning' : ''} /></button></div>
+          <div id="harness-recent-versions" className={`update-release-collapse${versionsExpanded ? ' expanded' : ''}`} aria-hidden={!versionsExpanded} inert={!versionsExpanded}>
+            <div className="update-release-collapse-inner">
+              <div className="update-release-list" aria-busy={busy}>
+                {versions.length === 0 ? <div className="update-release-empty">{state.updateStatus === 'error' ? '暂时无法读取版本列表。' : '正在读取近期版本…'}</div> : versions.map((entry) => {
+                  const current = entry.version === state.harnessVersion
+                  const selected = entry.version === selectedVersion
+                  const latest = entry.version === latestVersion
+                  const publishedAt = formatReleaseDate(entry.publishedAt)
+                  return (
+                    <article className={`update-release-row${selected ? ' selected' : ''}`} key={entry.version}>
+                      <div className="update-release-version"><strong>{entry.version}</strong><div className="update-release-meta"><span>{publishedAt ?? '发布时间未知'}</span><button className="update-release-link" type="button" onClick={() => void desktopApi.openHarnessRelease(entry.version)}>更新内容</button></div></div>
+                      <div className="update-release-tags">{latest ? <span className="latest">latest</span> : null}{current ? <span>当前</span> : null}{selected && !current ? <span className="selected">待应用</span> : null}</div>
+                      <div className="update-release-actions">
+                        {current && !selected ? <button type="button" disabled>正在使用</button>
+                          : selected && state.updateStatus === 'ready' ? <button className="primary" type="button" onClick={() => void desktopApi.restartToApplyUpdate()}>重启应用</button>
+                            : <button type="button" disabled={busy} onClick={() => void install(entry.version)}>{selected && state.updateStatus === 'downloading' ? '处理中…' : '安装'}</button>}
+                      </div>
+                    </article>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+      <footer className="dialog-actions"><button className="dialog-button secondary" type="button" onClick={onClose}>关闭</button>{state.updateStatus === 'ready' ? <button className="dialog-button primary" type="button" onClick={() => void desktopApi.restartToApplyUpdate()}>重启并应用 {state.updateVersion}</button> : <button className="dialog-button primary" type="button" disabled={busy} onClick={() => void refresh()}>{state.updateStatus === 'error' ? '重新检查' : '检查更新'}</button>}</footer>
+    </Modal>
+  )
+}
+
 function DevelopmentPanel({
   open,
   state,
+  harnessUrl,
   disabledPlugins,
   onClose,
 }: {
   open: boolean
   state: DevelopmentState
+  harnessUrl?: string
   disabledPlugins: PluginRecoveryEntry[]
   onClose: () => void
 }): ReactNode {
   const [actionError, setActionError] = useState<string>()
   const [cliError, setCliError] = useState<string>()
+  const [harnessUrlCopied, setHarnessUrlCopied] = useState(false)
   const closeButton = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
     if (open) closeButton.current?.focus({ preventScroll: true })
   }, [open])
+
+  useEffect(() => { setHarnessUrlCopied(false) }, [open, harnessUrl])
 
   const runAction = useCallback(async (action: () => Promise<void>, closeOnSuccess = false) => {
     setActionError(undefined)
@@ -207,6 +326,18 @@ function DevelopmentPanel({
         </div>
         {cliMessage ? <p className="cli-status-message">{cliMessage}</p> : null}
         {actionError ? <p className="cli-status-message">{actionError}</p> : null}
+
+        <section className="development-section">
+          <div className="section-heading"><div><h3>Harness 地址</h3><p>在系统浏览器中打开后，可使用开发者工具测试插件的移动端排版。</p></div></div>
+          <div className="development-url-row">
+            <div className={`path-value ${harnessUrl ? '' : 'empty'}`} title={harnessUrl}>{harnessUrl ?? '尚未启动'}</div>
+            <button className="compact-button subtle" type="button" disabled={!harnessUrl} onClick={() => void runAction(async () => {
+              await desktopApi.copyDevelopmentHarnessUrl()
+              setHarnessUrlCopied(true)
+            })}>{harnessUrlCopied ? '已复制' : '复制地址'}</button>
+            <button className="compact-button" type="button" disabled={!harnessUrl} onClick={() => void runAction(() => desktopApi.openDevelopmentHarnessUrl())}>在浏览器中打开</button>
+          </div>
+        </section>
 
         <section className="development-section">
           <div className="section-heading"><div><h3>Patch 配置</h3><p>等价于 <code>dsh web --patch &lt;配置文件&gt;</code>，重启 Harness 后生效。</p></div></div>
@@ -434,6 +565,7 @@ export function App(): ReactNode {
   const [state, setState] = useState<DesktopState>()
   const [menuOpen, setMenuOpen] = useState(false)
   const [releaseNotesOpen, setReleaseNotesOpen] = useState(false)
+  const [updateOpen, setUpdateOpen] = useState(false)
   const [developmentOpen, setDevelopmentOpen] = useState(false)
   const [pluginManagerOpen, setPluginManagerOpen] = useState(false)
   const [startupActionPending, setStartupActionPending] = useState(false)
@@ -484,6 +616,7 @@ export function App(): ReactNode {
     if (action === 'plugins') setPluginManagerOpen(true)
     else if (action === 'development') setDevelopmentOpen(true)
     else if (action === 'release-notes') setReleaseNotesOpen(true)
+    else if (action === 'update') setUpdateOpen(true)
   }), [])
 
   useEffect(() => desktopApi.onPointerInput(({ x, y }) => {
@@ -524,6 +657,7 @@ export function App(): ReactNode {
       if (event.key !== 'Escape') return
       if (pluginManagerOpen) setPluginManagerOpen(false)
       else if (developmentOpen) setDevelopmentOpen(false)
+      else if (updateOpen) setUpdateOpen(false)
       else if (releaseNotesOpen) setReleaseNotesOpen(false)
       else if (menuOpen) setMenuOpen(false)
       else if (browserDisplayMenuOpen) setBrowserDisplayMenuOpen(false)
@@ -533,7 +667,7 @@ export function App(): ReactNode {
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-  }, [browserDisplayMenuOpen, browserSettingsMenuOpen, developmentOpen, menuOpen, pluginManagerOpen, releaseNotesOpen])
+  }, [browserDisplayMenuOpen, browserSettingsMenuOpen, developmentOpen, menuOpen, pluginManagerOpen, releaseNotesOpen, updateOpen])
 
   useEffect(() => { if (releaseNotesOpen) releaseCloseButton.current?.focus({ preventScroll: true }) }, [releaseNotesOpen])
 
@@ -545,12 +679,6 @@ export function App(): ReactNode {
   const focusHarness = useCallback(() => {
     if (state?.harnessUrl) harnessFrame.current?.focus({ preventScroll: true })
   }, [state?.harnessUrl])
-  const runMenuAction = useCallback(async (action: TitleMenuAction) => {
-    setMenuOpen(false)
-    await desktopApi.titleMenuAction(action)
-    focusHarness()
-  }, [focusHarness])
-
   const update = useMemo(() => state === undefined ? undefined : updatePresentation(state), [state])
   const ready = state?.harnessLifecycle === 'ready'
   const preparingRuntime = state?.harnessLifecycle === 'starting' && state.harnessVersion === undefined
@@ -561,7 +689,7 @@ export function App(): ReactNode {
   const pluginFailure = state?.pluginFailure
   const browserOpen = state?.browser.panelOpen === true && state.browser.settings.enabled
   const browserDisplayMode: BrowserDisplayMode = state?.browser.settings.displayMode ?? 'split'
-  const browserModalOpen = releaseNotesOpen || developmentOpen || pluginManagerOpen
+  const browserModalOpen = releaseNotesOpen || updateOpen || developmentOpen || pluginManagerOpen
   const browserPanelOpen = browserOpen && browserDisplayMode !== 'floating'
   const browserMenuOpen = browserDisplayMenuOpen || browserSettingsMenuOpen
   const browserDisplayModeLabel = browserDisplayMode === 'split' ? '分栏' : browserDisplayMode === 'drawer' ? '抽屉' : '独立窗口'
@@ -1144,7 +1272,7 @@ export function App(): ReactNode {
           <div className="menu-list">
             <button id="development-action" className="menu-item" type="button" role="menuitem" onClick={(event) => { event.currentTarget.blur(); setMenuOpen(false); setDevelopmentOpen(true) }}><span className="item-label">开发工具</span><span className="item-meta">{patchEnabled ? 'Patch 已启用' : 'Patch 与 CLI'}</span><span className="item-dot" aria-hidden="true" /></button>
             <button id="plugins-action" className="menu-item" type="button" role="menuitem" onClick={(event) => { event.currentTarget.blur(); setMenuOpen(false); setPluginManagerOpen(true) }}><span className="item-label">插件管理</span><span className="item-meta">Profile 与来源</span><span className="item-dot" aria-hidden="true" /></button>
-            <button id="update-action" className="menu-item" type="button" role="menuitem" disabled={update.disabled} onClick={(event) => { event.currentTarget.blur(); void runMenuAction('update') }}><span id="update-title" className="item-label">{update.title}</span><span className="item-meta">{update.detail}</span><span className={update.dotClass} aria-hidden="true" /></button>
+            <button id="update-action" className="menu-item" type="button" role="menuitem" disabled={update.disabled} onClick={(event) => { event.currentTarget.blur(); setMenuOpen(false); setUpdateOpen(true) }}><span id="update-title" className="item-label">{update.title}</span><span className="item-meta">{update.detail}</span><span className={update.dotClass} aria-hidden="true" /></button>
             <button className="menu-item" type="button" role="menuitem" onClick={(event) => { event.currentTarget.blur(); setMenuOpen(false); setReleaseNotesOpen(true) }}><span className="item-label">版本说明与变更记录</span><span className="item-meta">{state.harnessVersion ?? '尚未启动'}</span></button>
           </div>
           <footer className="menu-footer"><span>桌面端版本</span><span id="version-label">{state.appVersion}</span></footer>
@@ -1172,8 +1300,9 @@ export function App(): ReactNode {
         <footer className="dialog-actions"><button className="dialog-button secondary" type="button" onClick={() => setReleaseNotesOpen(false)}>关闭</button><button className="dialog-button primary" type="button" onClick={(event) => { event.currentTarget.blur(); void desktopApi.titleMenuAction('open-changes') }}>查看官方 Release</button></footer>
       </Modal>
 
+      {state !== undefined ? <HarnessUpdatePanel open={updateOpen} state={state} onClose={() => { setUpdateOpen(false); requestAnimationFrame(focusHarness) }} /> : null}
       {state !== undefined ? <PluginManager open={pluginManagerOpen} harnessReady={ready} restarting={state.development.restarting} onClose={() => { setPluginManagerOpen(false); requestAnimationFrame(focusHarness) }} /> : null}
-      {state !== undefined ? <DevelopmentPanel open={developmentOpen} state={state.development} disabledPlugins={state.disabledPlugins} onClose={() => { setDevelopmentOpen(false); requestAnimationFrame(focusHarness) }} /> : null}
+      {state !== undefined ? <DevelopmentPanel open={developmentOpen} state={state.development} harnessUrl={state.harnessUrl} disabledPlugins={state.disabledPlugins} onClose={() => { setDevelopmentOpen(false); requestAnimationFrame(focusHarness) }} /> : null}
     </>
   )
 }
