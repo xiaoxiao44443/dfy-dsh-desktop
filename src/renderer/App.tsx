@@ -4,6 +4,7 @@ import type { MouseEvent, ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import type { BrowserDisplayMode, DesktopApplicationMenuAction, DesktopBrowserHistoryEntry, DesktopBrowserShellSnapshot, DesktopBrowserViewport, DesktopState, DevelopmentState, ManagedPluginEntry, PluginInventory, PluginMutationResult, PluginRecoveryEntry, PluginSourceType } from '../shared/contracts.js'
 import type { ContextMenuEntry, DesktopContextMenuRequest } from '../shared/context-menu.js'
+import { gitRepositoryWebUrl } from '../shared/plugin-source.js'
 import { AgentPointerIcon } from './AgentPointerIcon.js'
 import { ContextMenu } from './ContextMenu.js'
 import appIconUrl from '../../app-icon.png'
@@ -420,6 +421,7 @@ function pluginSourceCopyLabel(sourceType: PluginSourceType): string {
 }
 
 function pluginSourceCopyValue(plugin: ManagedPluginEntry): string {
+  if (plugin.sourceType === 'git') return gitRepositoryWebUrl(plugin.source)
   return plugin.sourceType === 'npm' ? `${plugin.name}@${plugin.source}` : plugin.source
 }
 
