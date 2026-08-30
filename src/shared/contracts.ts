@@ -80,6 +80,11 @@ export interface PluginRemoveRequest {
   packageName: string
 }
 
+export interface PluginUpdateRequest {
+  profile: string
+  packageName: string
+}
+
 export interface PluginActivationRequest {
   profile: string
   packageName: string
@@ -268,8 +273,10 @@ export interface DesktopBridge {
   getPluginInventory(): Promise<PluginInventory>
   chooseLocalPluginDirectory(): Promise<string | undefined>
   installPlugin(request: PluginInstallRequest): Promise<PluginMutationResult>
+  updatePlugin(request: PluginUpdateRequest): Promise<PluginMutationResult>
   removePlugin(request: PluginRemoveRequest): Promise<PluginMutationResult>
   setPluginActive(request: PluginActivationRequest): Promise<PluginMutationResult>
+  copyPluginText(text: string): Promise<void>
   openPluginDocumentation(): Promise<void>
   setBrowserPanelOpen(open: boolean): Promise<void>
   setBrowserDisplayMode(mode: BrowserDisplayMode): Promise<void>

@@ -1,8 +1,9 @@
 import { ArrowLeft, ArrowRight, Check, ChevronDown, Code2, Columns2, Copy, Download, FolderOpen, Globe2, History, Maximize2, Minimize2, Minus, MonitorSmartphone, MoreVertical, PanelRight, Plus, Puzzle, RotateCw, Search, Square, TabletSmartphone, Trash2, X } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { MouseEvent, ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import type { BrowserDisplayMode, DesktopApplicationMenuAction, DesktopBrowserHistoryEntry, DesktopBrowserShellSnapshot, DesktopBrowserViewport, DesktopState, DevelopmentState, ManagedPluginEntry, PluginInventory, PluginMutationResult, PluginRecoveryEntry, PluginSourceType } from '../shared/contracts.js'
-import type { DesktopContextMenuRequest } from '../shared/context-menu.js'
+import type { ContextMenuEntry, DesktopContextMenuRequest } from '../shared/context-menu.js'
 import { AgentPointerIcon } from './AgentPointerIcon.js'
 import { ContextMenu } from './ContextMenu.js'
 import appIconUrl from '../../app-icon.png'
@@ -232,14 +233,18 @@ function DevelopmentPanel({
   state,
   harnessUrl,
   disabledPlugins,
+  harnessReady,
   onClose,
 }: {
   open: boolean
   state: DevelopmentState
   harnessUrl?: string
   disabledPlugins: PluginRecoveryEntry[]
+  harnessReady: boolean
   onClose: () => void
 }): ReactNode {
+  const [profile, setProfile] = useState('web')
+  const [argumentsText, setArgumentsText] = useState('')
   const [actionError, setActionError] = useState<string>()
   const [cliError, setCliError] = useState<string>()
   const [harnessUrlCopied, setHarnessUrlCopied] = useState(false)
@@ -262,6 +267,17 @@ function DevelopmentPanel({
   }, [onClose])
 
   const patchPath = state.patchPath ?? ''
+  const commandOutput = actionError ?? state.commandOutput
+  const commandFailed = actionError !== undefined || (state.lastExitCode !== undefined && state.lastExitCode !== 0)
+  const commandPreview = `dsh plugin --profile ${profile.trim() || '<名称>'} ${argumentsText.trim() || '<pnpm 参数…>'}`
+  const commandRunnable = harnessReady
+    && !state.commandRunning
+    && profile.trim().length > 0
+    && argumentsText.trim().length > 0
+  const runPluginCommand = (): void => {
+    if (!commandRunnable) return
+    void runAction(() => desktopApi.runDevelopmentPlugin({ profile, argumentsText }))
+  }
   const cliRegistered = state.cli.status === 'enabled' || state.cli.status === 'broken'
   const cliUnavailable = state.cli.status === 'unavailable'
     || state.cli.status === 'unsupported'
@@ -363,7 +379,18 @@ function DevelopmentPanel({
           </section>
         ) : null}
 
-        <p className="development-note">插件的安装、来源与 Profile 归属已移到独立的“插件管理”。创造模式仍由 Harness 内置预设管理。</p>
+        <section className="development-section">
+          <div className="section-heading"><div><h3>自定义 Plugin 命令</h3><p>运行 <code>dsh plugin --profile &lt;名称&gt; &lt;pnpm 参数…&gt;</code>，可用于 update、why 等高级操作。</p></div></div>
+          <div className="command-fields">
+            <label><span>Profile</span><input value={profile} onChange={(event) => setProfile(event.target.value)} type="text" autoComplete="off" spellCheck="false" placeholder="例如 web" /></label>
+            <label className="arguments-field"><span>pnpm 参数</span><input value={argumentsText} onChange={(event) => setArgumentsText(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') runPluginCommand() }} type="text" autoComplete="off" spellCheck="false" placeholder="例如 update @scope/plugin" /></label>
+            <button className="dialog-button" type="button" disabled={!commandRunnable} onClick={runPluginCommand}>{state.commandRunning ? '运行中…' : '运行'}</button>
+          </div>
+          <div className="command-preview">{commandPreview}</div>
+          {commandOutput ? <pre className={`command-output ${commandFailed ? 'error' : ''}`}>{commandOutput}</pre> : null}
+        </section>
+
+        <p className="development-note">常规安装、移除、来源与启停管理仍在独立的“插件管理”；这里保留完整 pnpm 参数入口。</p>
       </div>
       <footer className="dialog-actions"><button className="dialog-button secondary" type="button" onClick={onClose}>完成</button></footer>
     </Modal>
@@ -377,6 +404,23 @@ const PLUGIN_SOURCE_LABELS: Record<PluginSourceType, string> = {
   npm: 'npm',
   workspace: '工作区',
   unknown: '其他',
+}
+
+interface PluginRowContextMenu {
+  plugin: ManagedPluginEntry
+  menu: DesktopContextMenuRequest
+}
+
+function pluginSourceCopyLabel(sourceType: PluginSourceType): string {
+  if (sourceType === 'git') return '复制 Git 仓库'
+  if (sourceType === 'npm') return '复制 npm 安装项'
+  if (sourceType === 'local') return '复制本地 Link'
+  if (sourceType === 'workspace') return '复制 Workspace 来源'
+  return '复制插件来源'
+}
+
+function pluginSourceCopyValue(plugin: ManagedPluginEntry): string {
+  return plugin.sourceType === 'npm' ? `${plugin.name}@${plugin.source}` : plugin.source
 }
 
 function PluginManager({
@@ -401,6 +445,8 @@ function PluginManager({
   const [lastResult, setLastResult] = useState<PluginMutationResult>()
   const [restartRequired, setRestartRequired] = useState(false)
   const [removeConfirmation, setRemoveConfirmation] = useState<string>()
+  const [updatingPlugin, setUpdatingPlugin] = useState<string>()
+  const [pluginContextMenu, setPluginContextMenu] = useState<PluginRowContextMenu>()
   const closeButton = useRef<HTMLButtonElement>(null)
 
   const loadInventory = useCallback(async () => {
@@ -425,7 +471,19 @@ function PluginManager({
     void loadInventory()
   }, [loadInventory, open])
 
-  useEffect(() => setRemoveConfirmation(undefined), [selectedProfile])
+  useEffect(() => {
+    setRemoveConfirmation(undefined)
+    setPluginContextMenu(undefined)
+  }, [selectedProfile])
+
+  useEffect(() => {
+    if (pluginContextMenu === undefined) return
+    const close = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setPluginContextMenu(undefined)
+    }
+    window.addEventListener('keydown', close)
+    return () => window.removeEventListener('keydown', close)
+  }, [pluginContextMenu])
 
   const activeProfile = inventory?.profiles.find((profile) => profile.name === selectedProfile)
   const normalizedQuery = query.trim().toLocaleLowerCase()
@@ -481,8 +539,74 @@ function PluginManager({
     }
   }
 
+  const update = async (packageName: string): Promise<void> => {
+    setUpdatingPlugin(packageName)
+    try {
+      await runMutation(() => desktopApi.updatePlugin({ profile: selectedProfile, packageName }))
+    } finally {
+      setUpdatingPlugin(undefined)
+    }
+  }
+
   const setActive = async (packageName: string, active: boolean): Promise<void> => {
     await runMutation(() => desktopApi.setPluginActive({ profile: selectedProfile, packageName, active }), false)
+  }
+
+  const copyPluginText = async (text: string): Promise<void> => {
+    setError(undefined)
+    try {
+      await desktopApi.copyPluginText(text)
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError))
+    }
+  }
+
+  const openPluginContextMenu = (event: MouseEvent, plugin: ManagedPluginEntry): void => {
+    event.preventDefault()
+    event.stopPropagation()
+    const items: ContextMenuEntry[] = [
+      { kind: 'item', id: 'copy-name', label: '复制插件名', enabled: true, icon: 'copy' },
+      { kind: 'item', id: 'copy-source', label: pluginSourceCopyLabel(plugin.sourceType), enabled: true, icon: 'link' },
+    ]
+    if (plugin.sourceType === 'git' || plugin.sourceType === 'npm') {
+      items.push(
+        { kind: 'separator', id: 'separator-update' },
+        { kind: 'item', id: 'update', label: updatingPlugin === plugin.name ? '正在更新…' : '更新插件', enabled: harnessReady && !operating, icon: 'refresh' },
+      )
+    }
+    if (plugin.toggleable || plugin.removable) items.push({ kind: 'separator', id: 'separator-actions' })
+    if (plugin.toggleable) {
+      items.push({
+        kind: 'item',
+        id: 'toggle',
+        label: plugin.active ? '停用插件' : '启用插件',
+        enabled: !operating && plugin.status !== 'missing',
+        icon: 'plugin',
+        checked: plugin.active,
+      })
+    }
+    if (plugin.removable) items.push({ kind: 'item', id: 'remove', label: '卸载插件', enabled: !operating, icon: 'trash', danger: true })
+    setPluginContextMenu({
+      plugin,
+      menu: {
+        requestId: `plugin-row-${Date.now().toString(36)}`,
+        x: event.clientX,
+        y: event.clientY,
+        items,
+      },
+    })
+  }
+
+  const selectPluginContextMenuItem = (itemId: string): void => {
+    const current = pluginContextMenu
+    setPluginContextMenu(undefined)
+    if (current === undefined) return
+    const plugin = current.plugin
+    if (itemId === 'copy-name') void copyPluginText(plugin.name)
+    else if (itemId === 'copy-source') void copyPluginText(pluginSourceCopyValue(plugin))
+    else if (itemId === 'update') void update(plugin.name)
+    else if (itemId === 'toggle') void setActive(plugin.name, !plugin.active)
+    else if (itemId === 'remove') setRemoveConfirmation(plugin.name)
   }
 
   const restart = async (): Promise<void> => {
@@ -501,9 +625,9 @@ function PluginManager({
 
   const renderPlugin = (plugin: ManagedPluginEntry): ReactNode => {
     const confirming = removeConfirmation === plugin.name
-    const stateLabel = plugin.status === 'missing' ? '来源失效' : !plugin.toggleable ? '非插件依赖' : plugin.active ? '已启用' : '已停用'
+    const stateLabel = updatingPlugin === plugin.name ? '更新中…' : plugin.status === 'missing' ? '来源失效' : !plugin.toggleable ? '非插件依赖' : plugin.active ? '已启用' : '已停用'
     return (
-      <div className={`plugin-row${plugin.status === 'missing' ? ' missing' : ''}`} key={plugin.name}>
+      <div className={`plugin-row${plugin.status === 'missing' ? ' missing' : ''}`} key={plugin.name} onContextMenu={(event) => openPluginContextMenu(event, plugin)}>
         <div className="plugin-row-main">
           <div className="plugin-name-line"><strong>{plugin.name}</strong>{plugin.version ? <span>{plugin.version}</span> : null}</div>
           <p>{plugin.description ?? (plugin.sourceType === 'builtin' ? '由当前 Harness 运行时提供' : '暂无插件说明')}</p>
@@ -537,7 +661,8 @@ function PluginManager({
   }
 
   return (
-    <Modal open={open} className="plugin-dialog" labelledBy="plugin-manager-title" closeLabel="关闭插件管理" onClose={onClose}>
+    <>
+      <Modal open={open} className="plugin-dialog" labelledBy="plugin-manager-title" closeLabel="关闭插件管理" onClose={onClose}>
       <header className="dialog-header plugin-dialog-header">
         <div className="dialog-heading">
           <span className="development-icon plugin-manager-icon" aria-hidden="true"><Puzzle /></span>
@@ -583,7 +708,16 @@ function PluginManager({
       </div>
 
       <footer className="dialog-actions plugin-dialog-actions"><button className="plugin-docs-button" type="button" onClick={() => void desktopApi.openPluginDocumentation()}>官方插件文档</button><span /><button className="dialog-button secondary" type="button" onClick={onClose}>完成</button></footer>
-    </Modal>
+      </Modal>
+      {open && pluginContextMenu !== undefined ? createPortal(
+        <div className="plugin-context-menu-layer" onPointerDown={() => setPluginContextMenu(undefined)} onContextMenu={(event) => event.preventDefault()}>
+          <div onPointerDown={(event) => event.stopPropagation()}>
+            <ContextMenu menu={pluginContextMenu.menu} onSelect={selectPluginContextMenuItem} />
+          </div>
+        </div>,
+        document.body,
+      ) : null}
+    </>
   )
 }
 
@@ -1328,7 +1462,7 @@ export function App(): ReactNode {
 
       {state !== undefined ? <HarnessUpdatePanel open={updateOpen} state={state} onClose={() => { setUpdateOpen(false); requestAnimationFrame(focusHarness) }} /> : null}
       {state !== undefined ? <PluginManager open={pluginManagerOpen} harnessReady={ready} restarting={state.development.restarting} onClose={() => { setPluginManagerOpen(false); requestAnimationFrame(focusHarness) }} /> : null}
-      {state !== undefined ? <DevelopmentPanel open={developmentOpen} state={state.development} harnessUrl={state.harnessUrl} disabledPlugins={state.disabledPlugins} onClose={() => { setDevelopmentOpen(false); requestAnimationFrame(focusHarness) }} /> : null}
+      {state !== undefined ? <DevelopmentPanel open={developmentOpen} state={state.development} harnessUrl={state.harnessUrl} disabledPlugins={state.disabledPlugins} harnessReady={ready} onClose={() => { setDevelopmentOpen(false); requestAnimationFrame(focusHarness) }} /> : null}
     </>
   )
 }

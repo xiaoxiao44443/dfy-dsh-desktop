@@ -11,6 +11,7 @@ import type {
   PluginProfileInventory,
   PluginRemoveRequest,
   PluginSourceType,
+  PluginUpdateRequest,
 } from '../shared/contracts.js'
 import type { HarnessCommandResult } from './harness-process.js'
 
@@ -95,6 +96,22 @@ export class PluginManagementService {
       throw new Error(`“${packageName}”不是 ${profile} Profile 中可移除的外部插件。`)
     }
     return await this.run(profile, ['remove', packageName])
+  }
+
+  async update(request: PluginUpdateRequest): Promise<PluginMutationResult> {
+    const profile = validateProfileName(request.profile)
+    const packageName = request.packageName.trim()
+    if (!PACKAGE_NAME_PATTERN.test(packageName)) throw new Error('插件包名无效。')
+    const manifest = await this.readManifest(join(this.harnessHome, 'profiles', profile, 'package.json'))
+    const dependencySpec = manifest.dependencies?.[packageName]
+    if (dependencySpec === undefined) {
+      throw new Error(`“${packageName}”不是 ${profile} Profile 中可更新的外部插件。`)
+    }
+    const sourceType = classifyPluginSource(dependencySpec)
+    if (sourceType !== 'git' && sourceType !== 'npm') {
+      throw new Error(`“${packageName}”使用${sourceType === 'local' ? '本地 Link' : '不可更新的'}来源，无需在线更新。`)
+    }
+    return await this.run(profile, ['update', packageName])
   }
 
   async setActive(request: PluginActivationRequest): Promise<PluginMutationResult> {

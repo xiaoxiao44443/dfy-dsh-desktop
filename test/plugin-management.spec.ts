@@ -81,7 +81,7 @@ describe('PluginManagementService', () => {
     ])
   })
 
-  it('forwards safe install and remove operations to the bundled pnpm', async () => {
+  it('forwards safe install, update, and remove operations to the bundled pnpm', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-plugin-commands-'))
     roots.push(root)
     const harnessHome = join(root, 'home')
@@ -101,14 +101,36 @@ describe('PluginManagementService', () => {
     })
 
     const installed = await service.install({ profile: 'web', source: '/tmp/My Plugin' })
+    const updated = await service.update({ profile: 'web', packageName: '@sample/plugin' })
     const removed = await service.remove({ profile: 'web', packageName: '@sample/plugin' })
 
     expect(calls).toEqual([
       { profile: 'web', args: ['add', '/tmp/My Plugin'] },
+      { profile: 'web', args: ['update', '@sample/plugin'] },
       { profile: 'web', args: ['remove', '@sample/plugin'] },
     ])
     expect(installed.command).toBe('pnpm add "/tmp/My Plugin" (Profile web)')
+    expect(updated.command).toBe('pnpm update @sample/plugin (Profile web)')
     expect(removed.output).toBe('done')
+  })
+
+  it('rejects online updates for local links', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-plugin-local-update-'))
+    roots.push(root)
+    const harnessHome = join(root, 'home')
+    const profileDir = join(harnessHome, 'profiles', 'web')
+    await mkdir(profileDir, { recursive: true })
+    await writeFile(join(profileDir, 'package.json'), JSON.stringify({
+      dsh: { profile: { bundles: [] } },
+      dependencies: { '@sample/local': 'link:../../../plugins/local' },
+    }))
+    const service = new PluginManagementService(harnessHome, {
+      getWindow: () => undefined,
+      runPnpm: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+    })
+
+    await expect(service.update({ profile: 'web', packageName: '@sample/local' }))
+      .rejects.toThrow('本地 Link')
   })
 
   it('reconciles bundle configuration after pnpm changes dependencies', async () => {

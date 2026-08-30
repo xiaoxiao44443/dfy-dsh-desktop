@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url'
 import { readFile } from 'node:fs/promises'
 import { app, BrowserWindow, clipboard, ipcMain, nativeImage, nativeTheme, shell } from 'electron'
 import type { ContextMenuParams, WebContents, WebFrameMain } from 'electron'
-import type { BrowserDisplayMode, BrowserMenuKind, ColorTheme, DesktopApplicationMenuAction, DesktopBrowserMenuAnchor, DesktopBrowserNavigationAction, DesktopBrowserViewBounds, DesktopBrowserViewport, DesktopPlatform, DesktopState, DevelopmentPluginRequest, HarnessLifecycle, PluginActivationRequest, PluginInitializationFailure, PluginInstallRequest, PluginRemoveRequest, TitleMenuAction, WindowAction } from '../shared/contracts.js'
+import type { BrowserDisplayMode, BrowserMenuKind, ColorTheme, DesktopApplicationMenuAction, DesktopBrowserMenuAnchor, DesktopBrowserNavigationAction, DesktopBrowserViewBounds, DesktopBrowserViewport, DesktopPlatform, DesktopState, DevelopmentPluginRequest, HarnessLifecycle, PluginActivationRequest, PluginInitializationFailure, PluginInstallRequest, PluginRemoveRequest, PluginUpdateRequest, TitleMenuAction, WindowAction } from '../shared/contracts.js'
 import type { DesktopContextMenuActionRequest, DesktopContextMenuRequest, DesktopPointerInput, PluginContextMenuCollection } from '../shared/context-menu.js'
 import { DESKTOP_CONTEXT_MENU_TRANSPORT_KEY, parsePluginContextMenuCollection } from '../shared/context-menu.js'
 import { RUNTIME_PREPARATION_PROGRESS_EVENT, type HarnessRuntimeManager } from './harness-runtime.js'
@@ -404,6 +404,11 @@ export class WindowController {
       if (this.plugins === undefined) throw new Error('插件管理服务尚未准备完成。')
       return this.plugins.install(request)
     })
+    ipcMain.handle('desktop:plugins-update', (event, request: PluginUpdateRequest) => {
+      if (event.sender !== this.window?.webContents) return
+      if (this.plugins === undefined) throw new Error('插件管理服务尚未准备完成。')
+      return this.plugins.update(request)
+    })
     ipcMain.handle('desktop:plugins-remove', (event, request: PluginRemoveRequest) => {
       if (event.sender !== this.window?.webContents) return
       if (this.plugins === undefined) throw new Error('插件管理服务尚未准备完成。')
@@ -413,6 +418,13 @@ export class WindowController {
       if (event.sender !== this.window?.webContents) return
       if (this.plugins === undefined) throw new Error('插件管理服务尚未准备完成。')
       return this.plugins.setActive(request)
+    })
+    ipcMain.handle('desktop:plugins-copy-text', (event, text: string) => {
+      if (event.sender !== this.window?.webContents) return
+      if (typeof text !== 'string' || text.length === 0 || text.length > 4_096 || /[\r\n\0]/u.test(text)) {
+        throw new Error('要复制的插件信息无效。')
+      }
+      clipboard.writeText(text)
     })
     ipcMain.handle('desktop:plugins-open-documentation', async (event) => {
       if (event.sender !== this.window?.webContents) return

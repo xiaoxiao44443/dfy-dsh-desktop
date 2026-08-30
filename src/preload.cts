@@ -17,6 +17,7 @@ import type {
   PluginInventory,
   PluginMutationResult,
   PluginRemoveRequest,
+  PluginUpdateRequest,
   TitleMenuAction,
   WindowAction,
 } from './shared/contracts.js'
@@ -43,8 +44,10 @@ const bridge: DesktopBridge = {
   getPluginInventory: () => ipcRenderer.invoke('desktop:plugins-inventory') as Promise<PluginInventory>,
   chooseLocalPluginDirectory: () => ipcRenderer.invoke('desktop:plugins-choose-local') as Promise<string | undefined>,
   installPlugin: (request: PluginInstallRequest) => ipcRenderer.invoke('desktop:plugins-install', request) as Promise<PluginMutationResult>,
+  updatePlugin: (request: PluginUpdateRequest) => ipcRenderer.invoke('desktop:plugins-update', request) as Promise<PluginMutationResult>,
   removePlugin: (request: PluginRemoveRequest) => ipcRenderer.invoke('desktop:plugins-remove', request) as Promise<PluginMutationResult>,
   setPluginActive: (request: PluginActivationRequest) => ipcRenderer.invoke('desktop:plugins-set-active', request) as Promise<PluginMutationResult>,
+  copyPluginText: (text: string) => ipcRenderer.invoke('desktop:plugins-copy-text', text) as Promise<void>,
   openPluginDocumentation: () => ipcRenderer.invoke('desktop:plugins-open-documentation') as Promise<void>,
   setBrowserPanelOpen: (open: boolean) => ipcRenderer.invoke('desktop:browser-panel-open', open) as Promise<void>,
   setBrowserDisplayMode: (mode: BrowserDisplayMode) => ipcRenderer.invoke('desktop:browser-display-mode', mode) as Promise<void>,

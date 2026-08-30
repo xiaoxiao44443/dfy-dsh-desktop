@@ -1788,6 +1788,7 @@ body.maximized .restore-icon { display: block; }
 }
 
 .plugin-row:last-child { border-bottom: 0; }
+.plugin-row:hover { background: color-mix(in srgb, var(--menu-hover) 46%, transparent); }
 .plugin-row.missing { background: rgba(226, 75, 85, 0.045); }
 .plugin-row-main { display: grid; min-width: 0; gap: 4px; }
 .plugin-name-line { display: flex; min-width: 0; align-items: baseline; gap: 8px; }
@@ -1919,6 +1920,14 @@ body.maximized .restore-icon { display: block; }
 .plugin-remove-confirmation { display: flex; gap: 5px; }
 .compact-button.danger { color: #f1a2a8; border-color: rgba(226, 75, 85, 0.28); background: rgba(226, 75, 85, 0.09); }
 .compact-button.danger:hover:not(:disabled) { background: rgba(226, 75, 85, 0.16); }
+
+.plugin-context-menu-layer {
+  position: fixed;
+  z-index: 100;
+  inset: 0;
+}
+
+.plugin-context-menu-layer .context-menu-card { z-index: 1; }
 
 .plugin-dialog-actions { min-height: 56px; }
 .plugin-dialog-actions > span { flex: 1; }
