@@ -366,10 +366,9 @@ export class WindowController {
       if (event.sender !== this.window?.webContents) return
       await shell.openExternal(resolveHarnessReleaseUrl(version))
     })
-    ipcMain.handle('desktop:restart-update', () => {
+    ipcMain.handle('desktop:restart-update', async () => {
       if (this.runtime.updateState.status !== 'ready') return
-      app.relaunch()
-      app.quit()
+      await this.development.restartHarness()
     })
     ipcMain.handle('desktop:development-choose-patch', () => this.development.choosePatch())
     ipcMain.handle('desktop:development-clear-patch', () => this.development.clearPatch())
@@ -896,8 +895,7 @@ export class WindowController {
     if (action === 'update') {
       if (update.status === 'checking' || update.status === 'downloading') return
       if (update.status === 'ready') {
-        app.relaunch()
-        app.quit()
+        await this.development.restartHarness()
       } else {
         await this.runtime.checkForUpdates({ download: false })
       }

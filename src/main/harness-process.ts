@@ -8,10 +8,26 @@ import { HarnessToolchainManager, prependToolchainToPath } from './harness-toolc
 import type { HarnessDesktopBridgeLaunch } from './harness-desktop-bridge.js'
 import { parsePluginInitializationFailure, PluginInitializationError } from './plugin-recovery.js'
 
-const URL_PATTERN = /dsh web:\s+(http:\/\/127\.0\.0\.1:\d+)/u
+const URL_PATTERN = /dsh web:\s+(http:\/\/127\.0\.0\.1:\d+(?:\/[^\s]*)?)/u
 const START_TIMEOUT_MS = 90_000
 const STARTUP_OUTPUT_DETAIL_LIMIT = 2_000
 const HARNESS_BOOTSTRAP = fileURLToPath(new URL('../harness-bootstrap.cjs', import.meta.url))
+
+export function parseHarnessPublishedUrl(output: string): string | undefined {
+  const url = URL_PATTERN.exec(output)?.[1]
+  if (url === undefined) return undefined
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'http:' || parsed.hostname !== '127.0.0.1' || parsed.port.length === 0) return undefined
+    return url
+  } catch {
+    return undefined
+  }
+}
+
+export function isHarnessHealthStatus(status: number): boolean {
+  return status >= 200 && status < 400
+}
 
 export function withHarnessStartupOutput(error: unknown, startupOutput: string): Error {
   const message = error instanceof Error ? error.message : String(error)
@@ -240,8 +256,8 @@ export class HarnessProcess extends EventEmitter {
       const timeout = setTimeout(() => finish(new Error('Harness did not publish its local URL in time')), START_TIMEOUT_MS)
       const onData = (chunk: Buffer): void => {
         output = `${output}${chunk.toString('utf8')}`.slice(-32_000)
-        const match = URL_PATTERN.exec(output)
-        if (match?.[1] !== undefined) finish(undefined, match[1])
+        const url = parseHarnessPublishedUrl(output)
+        if (url !== undefined) finish(undefined, url)
       }
       const onExit = (code: number | null, signal: NodeJS.Signals | null): void => finish(new Error(`Harness exited before startup (${String(code ?? signal)})`))
       const onError = (error: Error): void => finish(error)
@@ -265,8 +281,15 @@ export class HarnessProcess extends EventEmitter {
     while (Date.now() < deadline) {
       if (child.exitCode !== null || child.signalCode !== null) throw new Error(`Harness exited during health check (${String(child.exitCode ?? child.signalCode)})`)
       try {
-        const response = await fetch(url, { signal: AbortSignal.timeout(3_000) })
-        if (response.ok) return
+        // DSH 0.1.2 exchanges the one-time URL token for an HttpOnly cookie and
+        // answers with a 303 redirect. Node fetch does not retain that cookie
+        // while following the redirect, so inspect the initial response. The
+        // embedded Chromium frame performs the cookie exchange itself.
+        const response = await fetch(url, {
+          redirect: 'manual',
+          signal: AbortSignal.timeout(3_000),
+        })
+        if (isHarnessHealthStatus(response.status)) return
         lastError = `HTTP ${response.status}`
       } catch (error) {
         lastError = error instanceof Error ? error.message : String(error)

@@ -133,6 +133,30 @@ describe('Harness release URL', () => {
 })
 
 describe('WindowController Harness reload', () => {
+  it('applies a prepared runtime by restarting only the Harness process', async () => {
+    const restartHarness = vi.fn(async () => undefined)
+    const runtime = Object.assign(new EventEmitter(), {
+      harnessHome: '/path/that/does/not/exist',
+      updateState: { status: 'ready', version: '0.1.2-alpha.2', versions: [] },
+      checkForUpdates: vi.fn(),
+      installHarnessVersion: vi.fn(),
+    })
+    const development = Object.assign(new EventEmitter(), {
+      state: { pnpmVersion: '11.19.0', restarting: false, commandRunning: false },
+      choosePatch: vi.fn(),
+      clearPatch: vi.fn(),
+      restartHarness,
+      runPlugin: vi.fn(),
+    })
+    const controller = new WindowController(runtime as never, development as never)
+    await controller.create()
+
+    await electronMocks.ipcHandlers.get('desktop:restart-update')?.({})
+    await electronMocks.ipcHandlers.get('desktop:title-menu-action')?.({}, 'update')
+
+    expect(restartHarness).toHaveBeenCalledTimes(2)
+  })
+
   it('checks metadata without downloading and installs only the selected Harness version', async () => {
     const checkForUpdates = vi.fn(async () => undefined)
     const installHarnessVersion = vi.fn(async () => undefined)
@@ -219,7 +243,7 @@ describe('WindowController Harness reload', () => {
 
     const window = electronMocks.window
     expect(window).toBeDefined()
-    const url = 'http://127.0.0.1:43210'
+    const url = 'http://127.0.0.1:43210/?token=development-secret'
 
     const firstLoad = controller.showHarness(url, '0.1.0')
     const firstStartingState = window?.webContents.send.mock.calls.at(-1)?.[1]

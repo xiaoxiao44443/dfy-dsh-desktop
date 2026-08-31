@@ -180,7 +180,12 @@ describe('Harness runtime update policy', () => {
       vi.stubGlobal('fetch', vi.fn(async () => ({
         ok: true,
         json: async () => ({
-          'dist-tags': { latest: '0.1.0-rc.9' },
+          'dist-tags': {
+            latest: '0.1.0-rc.9',
+            next: '0.1.0-rc.9',
+            alpha: '0.1.0-rc.8',
+            preview: '0.1.0-rc.8',
+          },
           versions: {
             '0.1.0-rc.7': {},
             '0.1.0-rc.8': {},
@@ -201,8 +206,8 @@ describe('Harness runtime update policy', () => {
         version: '0.1.0-rc.9',
         latestVersion: '0.1.0-rc.9',
         versions: [
-          { version: '0.1.0-rc.9', publishedAt: '2026-08-19T00:00:00.000Z' },
-          { version: '0.1.0-rc.8', publishedAt: '2026-08-18T00:00:00.000Z' },
+          { version: '0.1.0-rc.9', publishedAt: '2026-08-19T00:00:00.000Z', distTags: ['latest', 'next'] },
+          { version: '0.1.0-rc.8', publishedAt: '2026-08-18T00:00:00.000Z', distTags: ['alpha', 'preview'] },
           { version: '0.1.0-rc.7', publishedAt: '2026-08-17T00:00:00.000Z' },
         ],
         message: '发现新版本，可选择版本下载安装',
@@ -217,10 +222,21 @@ describe('Harness runtime update policy', () => {
 
       expect(installVersion).toHaveBeenCalledWith('0.1.0-rc.9', expect.any(Function))
       expect(manager.updateState).toMatchObject({ status: 'ready', version: '0.1.0-rc.9' })
+      await manager.markHealthy({
+        version: '0.1.0-rc.9',
+        entryPath: '/managed/dsh/lib/bin.js',
+        source: 'managed',
+        pending: true,
+      })
+      expect(manager.updateState).toMatchObject({
+        status: 'current',
+        version: '0.1.0-rc.9',
+        message: '当前正在使用这个版本',
+      })
       state = JSON.parse(await readFile(join(userData, 'harness-runtime', 'state.json'), 'utf8')) as {
         pendingVersion?: string
       }
-      expect(state.pendingVersion).toBe('0.1.0-rc.9')
+      expect(state.pendingVersion).toBeUndefined()
     } finally {
       vi.unstubAllGlobals()
       await rm(root, { recursive: true, force: true })

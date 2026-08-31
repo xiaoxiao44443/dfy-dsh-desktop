@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { buildHarnessArguments, withHarnessStartupOutput } from '../src/main/harness-process.js'
+import {
+  buildHarnessArguments,
+  isHarnessHealthStatus,
+  parseHarnessPublishedUrl,
+  withHarnessStartupOutput,
+} from '../src/main/harness-process.js'
 
 describe('Harness launch arguments', () => {
   it('keeps every DSH launcher patch before web application options', () => {
@@ -17,6 +22,20 @@ describe('Harness launch arguments', () => {
 })
 
 describe('Harness startup diagnostics', () => {
+  it('preserves alpha authentication parameters from the published URL', () => {
+    expect(parseHarnessPublishedUrl(
+      'dsh web: http://127.0.0.1:62751/?token=secret-token\n',
+    )).toBe('http://127.0.0.1:62751/?token=secret-token')
+    expect(parseHarnessPublishedUrl('dsh web: http://localhost:62751/?token=secret')).toBeUndefined()
+  })
+
+  it('accepts the alpha token-to-cookie redirect as a healthy response', () => {
+    expect(isHarnessHealthStatus(200)).toBe(true)
+    expect(isHarnessHealthStatus(303)).toBe(true)
+    expect(isHarnessHealthStatus(401)).toBe(false)
+    expect(isHarnessHealthStatus(500)).toBe(false)
+  })
+
   it('keeps the captured process error with the generic exit message', () => {
     const error = withHarnessStartupOutput(
       new Error('Harness exited before startup (1)'),

@@ -189,12 +189,21 @@ export class HarnessRuntimeManager extends EventEmitter {
   }
 
   async markHealthy(candidate: HarnessRuntimeCandidate): Promise<void> {
-    if (candidate.source !== 'managed') return
-    const state = this.mustState()
-    state.activeVersion = candidate.version
-    if (state.pendingVersion === candidate.version) delete state.pendingVersion
-    delete state.badVersions[candidate.version]
-    await this.persistState()
+    if (candidate.source === 'managed') {
+      const state = this.mustState()
+      state.activeVersion = candidate.version
+      if (state.pendingVersion === candidate.version) delete state.pendingVersion
+      delete state.badVersions[candidate.version]
+      await this.persistState()
+    }
+    if (this.updateView.status === 'ready' && this.updateView.version === candidate.version) {
+      this.setUpdateView({
+        ...this.updateView,
+        status: 'current',
+        progress: 100,
+        message: '当前正在使用这个版本',
+      })
+    }
   }
 
   async markFailed(candidate: HarnessRuntimeCandidate, reason: string): Promise<void> {
@@ -274,7 +283,7 @@ export class HarnessRuntimeManager extends EventEmitter {
           latestVersion: targetVersion,
           versions: catalog.versions,
           progress: 100,
-          message: '版本已准备好，重启桌面应用后生效',
+          message: '版本已准备好，重启 Harness 后生效',
         })
         return
       }
@@ -374,7 +383,7 @@ export class HarnessRuntimeManager extends EventEmitter {
       latestVersion: catalog.latestVersion,
       versions: catalog.versions,
       progress: 100,
-      message: '版本已准备好，重启桌面应用后生效',
+      message: '版本已准备好，重启 Harness 后生效',
     })
   }
 
@@ -389,8 +398,16 @@ export class HarnessRuntimeManager extends EventEmitter {
     if (latestVersion === undefined || semver.valid(latestVersion) === null) {
       throw new Error('npm registry did not return a valid latest version')
     }
+    const distTagsByVersion = new Map<string, Set<string>>()
+    for (const [rawTag, version] of Object.entries(metadata['dist-tags'] ?? {})) {
+      const tag = rawTag.trim()
+      if (tag.length === 0 || semver.valid(version) === null) continue
+      const tags = distTagsByVersion.get(version) ?? new Set<string>()
+      tags.add(tag)
+      distTagsByVersion.set(version, tags)
+    }
     const availableVersions = new Set(Object.keys(metadata.versions ?? {}).filter((version) => semver.valid(version) !== null))
-    availableVersions.add(latestVersion)
+    for (const version of distTagsByVersion.keys()) availableVersions.add(version)
     const versions = [...availableVersions]
       .sort((left, right) => {
         const leftTime = Date.parse(metadata.time?.[left] ?? '')
@@ -399,10 +416,15 @@ export class HarnessRuntimeManager extends EventEmitter {
         return semver.rcompare(left, right)
       })
       .slice(0, RECENT_HARNESS_VERSION_LIMIT)
-      .map((version) => ({
-        version,
-        ...(metadata.time?.[version] === undefined ? {} : { publishedAt: metadata.time[version] }),
-      }))
+      .map((version) => {
+        const distTags = [...(distTagsByVersion.get(version) ?? [])]
+          .sort((left, right) => left === 'latest' ? -1 : right === 'latest' ? 1 : left.localeCompare(right))
+        return {
+          version,
+          ...(metadata.time?.[version] === undefined ? {} : { publishedAt: metadata.time[version] }),
+          ...(distTags.length === 0 ? {} : { distTags }),
+        }
+      })
     return { latestVersion, versions }
   }
 

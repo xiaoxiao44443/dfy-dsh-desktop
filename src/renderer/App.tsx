@@ -168,6 +168,19 @@ function HarnessUpdatePanel({ open, state, onClose }: { open: boolean; state: De
     }
   }
 
+  const apply = async (): Promise<void> => {
+    setActionPending(true)
+    setActionError(undefined)
+    try {
+      await desktopApi.restartToApplyUpdate()
+      onClose()
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setActionPending(false)
+    }
+  }
+
   const statusTitle = state.updateStatus === 'checking' ? '正在获取版本信息'
     : state.updateStatus === 'downloading' ? `正在准备 Harness ${state.updateVersion ?? ''}`.trim()
       : state.updateStatus === 'ready' ? `Harness ${state.updateVersion ?? ''} 已准备好`.trim()
@@ -206,14 +219,15 @@ function HarnessUpdatePanel({ open, state, onClose }: { open: boolean; state: De
                   const current = entry.version === state.harnessVersion
                   const selected = entry.version === selectedVersion
                   const latest = entry.version === latestVersion
+                  const distTags = entry.distTags ?? (latest ? ['latest'] : [])
                   const publishedAt = formatReleaseDate(entry.publishedAt)
                   return (
                     <article className={`update-release-row${selected ? ' selected' : ''}`} key={entry.version}>
-                      <div className="update-release-version"><strong>{entry.version}</strong><div className="update-release-meta"><span>{publishedAt ?? '发布时间未知'}</span><button className="update-release-link" type="button" onClick={() => void desktopApi.openHarnessRelease(entry.version)}>更新内容</button></div></div>
-                      <div className="update-release-tags">{latest ? <span className="latest">latest</span> : null}{current ? <span>当前</span> : null}{selected && !current ? <span className="selected">待应用</span> : null}</div>
+                      <div className="update-release-version"><div className="update-release-title"><strong>{entry.version}</strong>{distTags.length === 0 ? null : <div className="update-release-channels" aria-label="npm 发布标签">{distTags.map((tag) => <span className={`update-release-channel${tag === 'latest' ? ' latest' : ''}`} title={`npm dist-tag: ${tag}`} key={tag}>{tag}</span>)}</div>}</div><div className="update-release-meta"><span>{publishedAt ?? '发布时间未知'}</span><button className="update-release-link" type="button" onClick={() => void desktopApi.openHarnessRelease(entry.version)}>更新内容</button></div></div>
+                      <div className="update-release-tags">{current ? <span>当前</span> : null}{selected && !current ? <span className="selected">待应用</span> : null}</div>
                       <div className="update-release-actions">
                         {current && !selected ? <button type="button" disabled>正在使用</button>
-                          : selected && state.updateStatus === 'ready' ? <button className="primary" type="button" onClick={() => void desktopApi.restartToApplyUpdate()}>重启应用</button>
+                          : selected && state.updateStatus === 'ready' ? <button className="primary" type="button" disabled={busy} onClick={() => void apply()}>重启 Harness</button>
                             : <button type="button" disabled={busy} onClick={() => void install(entry.version)}>{selected && state.updateStatus === 'downloading' ? '处理中…' : '安装'}</button>}
                       </div>
                     </article>
@@ -224,7 +238,7 @@ function HarnessUpdatePanel({ open, state, onClose }: { open: boolean; state: De
           </div>
         </section>
       </div>
-      <footer className="dialog-actions"><button className="dialog-button secondary" type="button" onClick={onClose}>关闭</button>{state.updateStatus === 'ready' ? <button className="dialog-button primary" type="button" onClick={() => void desktopApi.restartToApplyUpdate()}>重启并应用 {state.updateVersion}</button> : <button className="dialog-button primary" type="button" disabled={busy} onClick={() => void refresh()}>{state.updateStatus === 'error' ? '重新检查' : '检查更新'}</button>}</footer>
+      <footer className="dialog-actions"><button className="dialog-button secondary" type="button" onClick={onClose}>关闭</button>{state.updateStatus === 'ready' ? <button className="dialog-button primary" type="button" disabled={busy} onClick={() => void apply()}>重启 Harness 并应用 {state.updateVersion}</button> : <button className="dialog-button primary" type="button" disabled={busy} onClick={() => void refresh()}>{state.updateStatus === 'error' ? '重新检查' : '检查更新'}</button>}</footer>
     </Modal>
   )
 }

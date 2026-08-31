@@ -9,6 +9,8 @@ export type HarnessUpdateStatus = 'idle' | 'checking' | 'available' | 'downloadi
 export interface HarnessReleaseVersion {
   version: string
   publishedAt?: string
+  /** npm distribution channels currently pointing at this version. */
+  distTags?: string[]
 }
 
 export type DevelopmentCliStatus =

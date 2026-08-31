@@ -1422,7 +1422,23 @@ body.maximized .restore-icon { display: block; }
 .update-release-row:last-child { border-bottom: 0; }
 .update-release-row.selected { background: rgba(125, 131, 255, 0.07); }
 .update-release-version { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
-.update-release-version strong { overflow: hidden; font-size: 13px; font-weight: 580; text-overflow: ellipsis; white-space: nowrap; }
+.update-release-title { display: flex; min-width: 0; align-items: center; gap: 7px; }
+.update-release-title > strong { min-width: 0; overflow: hidden; font-size: 13px; font-weight: 580; text-overflow: ellipsis; white-space: nowrap; }
+.update-release-channels { display: flex; min-width: 0; flex: none; align-items: center; gap: 4px; }
+.update-release-channel {
+  max-width: 92px;
+  overflow: hidden;
+  padding: 1px 6px;
+  color: color-mix(in srgb, var(--accent) 58%, var(--menu-text));
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  font-size: 9.5px;
+  line-height: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.update-release-channel.latest { color: #b6b9ff; border-color: rgba(125, 131, 255, 0.32); background: rgba(125, 131, 255, 0.1); }
 .update-release-meta { display: flex; min-width: 0; align-items: baseline; gap: 12px; }
 .update-release-meta span { color: var(--menu-muted); font-size: 11px; }
 .update-release-link {
@@ -1439,7 +1455,6 @@ body.maximized .restore-icon { display: block; }
 .update-release-link:focus-visible { color: var(--menu-text); text-decoration: none; }
 .update-release-tags { display: flex; min-width: 0; align-items: center; justify-content: flex-end; gap: 5px; }
 .update-release-tags span { padding: 2px 6px; color: var(--menu-muted); border: 1px solid var(--menu-border); border-radius: 999px; font-size: 10px; }
-.update-release-tags .latest { color: #b6b9ff; border-color: rgba(125, 131, 255, 0.32); background: rgba(125, 131, 255, 0.1); }
 .update-release-tags .selected { color: #74d8a5; border-color: rgba(47, 166, 111, 0.34); background: rgba(47, 166, 111, 0.1); }
 .update-release-actions { display: grid; grid-template-columns: 84px; align-items: center; justify-content: end; }
 .update-release-actions > button {
