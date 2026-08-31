@@ -173,6 +173,19 @@ function ApplicationMenu({ payload }: { payload: BrowserMenuWindowPayload }): Re
     : status === 'checking' || status === 'downloading' ? 'busy'
       : status === 'error' ? 'error'
         : ''
+  const desktopStatus = application.desktopUpdate.status
+  const desktopUpdateMeta = desktopStatus === 'ready' ? '安装包已就绪'
+    : desktopStatus === 'available' ? `可更新 ${application.desktopUpdate.version ?? ''}`.trim()
+      : desktopStatus === 'checking' ? '正在检查…'
+        : desktopStatus === 'downloading' ? `下载 ${application.desktopUpdate.progress ?? 0}%`
+          : desktopStatus === 'current' ? application.appVersion
+            : desktopStatus === 'error' ? '检查失败'
+              : application.appVersion
+  const desktopUpdateDot = desktopStatus === 'ready' ? 'ready'
+    : desktopStatus === 'available' ? 'available'
+      : desktopStatus === 'checking' || desktopStatus === 'downloading' ? 'busy'
+        : desktopStatus === 'error' ? 'error'
+          : ''
   const item = (label: string, meta: string, action: DesktopApplicationMenuAction, disabled = false, dot = ''): React.JSX.Element => (
     <button key={action} type="button" className="application-item" disabled={disabled} onClick={() => void invoke('application-action', action)}>
       <span>{label}</span><span className="application-meta">{meta}</span><span className={`application-dot${dot.length > 0 ? ` ${dot}` : ''}`} />
@@ -186,7 +199,7 @@ function ApplicationMenu({ payload }: { payload: BrowserMenuWindowPayload }): Re
         {item(updateTitle, updateMeta, 'update', false, updateDot)}
         {item('版本说明与变更记录', application.harnessVersion ?? '尚未启动', 'release-notes')}
       </div>
-      <footer className="application-footer"><span>桌面端版本</span><span>{application.appVersion}</span></footer>
+      <footer className="application-footer"><button type="button" aria-label={`桌面端更新，${desktopUpdateMeta}`} onClick={() => void invoke('application-action', 'desktop-update')}><span>桌面端版本</span><span className="application-footer-meta"><span>{desktopUpdateMeta}</span>{desktopUpdateDot.length === 0 ? null : <span className={`application-dot ${desktopUpdateDot}`} />}</span></button></footer>
     </div>
   )
 }

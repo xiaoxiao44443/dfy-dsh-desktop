@@ -14,6 +14,8 @@ import { PluginInitializationError, PluginRecoveryService } from './plugin-recov
 import { DesktopBrowserService } from './desktop-browser.js'
 import { DshCliIntegration } from './dsh-cli-integration.js'
 import { PluginManagementService } from './plugin-management.js'
+import { DesktopRendererHost } from './desktop-renderer-host.js'
+import { DesktopUpdateService } from './desktop-update.js'
 
 // Chromium may not propagate macOS' dark color-scheme media query into the
 // cross-origin Harness iframe. Preserve explicit Harness light/dark choices,
@@ -86,15 +88,19 @@ if (!app.requestSingleInstanceLock()) {
   let development: DevelopmentService | undefined
   let desktopBridge: HarnessDesktopBridgeHost | undefined
   let browser: DesktopBrowserService | undefined
+  let rendererHost: DesktopRendererHost | undefined
+  let desktopUpdates: DesktopUpdateService | undefined
   let quitting = false
 
   app.on('second-instance', () => windows?.focus())
   app.on('before-quit', () => {
     quitting = true
     runtime?.stopAutomaticChecks()
+    desktopUpdates?.stopAutomaticChecks()
     void harness?.stop()
     void directoryPicker?.stop()
     void desktopBridge?.stop()
+    void rendererHost?.stop()
   })
   app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })
   app.on('activate', () => { if (!quitting) void windows?.create() })
@@ -183,6 +189,27 @@ if (!app.requestSingleInstanceLock()) {
     await development.initialize()
     browser = new DesktopBrowserService(join(app.getPath('userData'), 'browser'))
     await browser.initialize()
+    const desktopUpdateDemoApiUrl = !app.isPackaged
+      ? process.env.DFY_DESKTOP_UPDATE_DEMO_API_URL?.trim()
+      : undefined
+    desktopUpdates = new DesktopUpdateService({
+      updatesRoot: join(app.getPath('userData'), 'updates'),
+      currentVersion: app.getVersion(),
+      ...(desktopUpdateDemoApiUrl === undefined || desktopUpdateDemoApiUrl.length === 0
+        ? {}
+        : {
+            releasesApiUrl: desktopUpdateDemoApiUrl,
+            releasesPageUrl: desktopUpdateDemoApiUrl,
+            allowLoopbackHttp: true,
+          }),
+    })
+    await desktopUpdates.initialize()
+    const rendererDevUrl = !app.isPackaged ? process.env.HARNESS_DESKTOP_RENDERER_URL : undefined
+    let rendererUrl: string | undefined
+    if (rendererDevUrl === undefined) {
+      rendererHost = new DesktopRendererHost(join(app.getAppPath(), 'dist', 'renderer'))
+      rendererUrl = await rendererHost.start()
+    }
     const pluginManagement = new PluginManagementService(runtime.harnessHome, {
       getWindow: () => windows?.getBrowserWindow(),
       runPnpm: async (profile, args) => {
@@ -191,9 +218,27 @@ if (!app.requestSingleInstanceLock()) {
       },
     })
     debugLog('[desktop] creating startup window')
-    windows = new WindowController(runtime, development, pluginRecovery, browser, pluginManagement)
+    windows = new WindowController(
+      runtime,
+      development,
+      pluginRecovery,
+      browser,
+      pluginManagement,
+      rendererUrl,
+      desktopUpdates,
+      async () => {
+        runtime?.stopAutomaticChecks()
+        desktopUpdates?.stopAutomaticChecks()
+        await Promise.allSettled([
+          harness?.stop(),
+          directoryPicker?.stop(),
+          desktopBridge?.stop(),
+        ])
+      },
+    )
     windows.setRuntimePreparing()
     await windows.create()
+    desktopUpdates.scheduleAutomaticChecks()
     debugLog('[desktop] startup window created; resolving Harness runtime')
     await runtime.initialize()
     debugLog('[desktop] Harness runtime resolved; starting Harness')

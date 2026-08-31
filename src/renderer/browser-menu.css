@@ -257,13 +257,27 @@ button:disabled { opacity: .38; }
 .application-dot.error { background: #d95762; opacity: 1; }
 
 .application-footer {
-  display: flex;
   height: 39px;
   flex: none;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 18px;
   color: var(--menu-muted);
   border-top: 1px solid var(--menu-border);
   font-size: 12px;
 }
+
+.application-footer > button {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 18px;
+  color: inherit;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+}
+
+.application-footer > button:hover { color: var(--menu-text); background: var(--menu-hover); }
+.application-footer-meta { display: flex; min-width: 0; align-items: center; gap: 9px; }
+.application-footer-meta > span:first-child { overflow: hidden; max-width: 150px; text-overflow: ellipsis; white-space: nowrap; }

@@ -6,6 +6,17 @@ export type DesktopPlatform = 'windows' | 'macos' | 'linux'
 
 export type HarnessUpdateStatus = 'idle' | 'checking' | 'available' | 'downloading' | 'ready' | 'current' | 'error'
 
+export type DesktopUpdateStatus = 'idle' | 'checking' | 'available' | 'downloading' | 'ready' | 'current' | 'error'
+
+export interface DesktopUpdateState {
+  status: DesktopUpdateStatus
+  version?: string
+  publishedAt?: string
+  releaseUrl?: string
+  progress?: number
+  message?: string
+}
+
 export interface HarnessReleaseVersion {
   version: string
   publishedAt?: string
@@ -113,7 +124,7 @@ export interface PluginInitializationFailure extends PluginRecoveryEntry {
 export type BrowserAgentOpenMode = 'background' | 'visible'
 export type BrowserDisplayMode = 'split' | 'drawer' | 'floating'
 export type BrowserMenuKind = 'application' | 'display' | 'settings'
-export type DesktopApplicationMenuAction = 'plugins' | 'development' | 'release-notes' | 'update'
+export type DesktopApplicationMenuAction = 'plugins' | 'development' | 'release-notes' | 'update' | 'desktop-update'
 
 export interface DesktopApplicationMenuState {
   appVersion: string
@@ -122,6 +133,7 @@ export interface DesktopApplicationMenuState {
   updateVersion?: string
   updateLatestVersion?: string
   updateProgress?: number
+  desktopUpdate: DesktopUpdateState
   patchEnabled: boolean
 }
 
@@ -246,6 +258,7 @@ export interface DesktopState {
   updateVersions?: HarnessReleaseVersion[]
   updateProgress?: number
   updateMessage?: string
+  desktopUpdate: DesktopUpdateState
   development: DevelopmentState
   browser: DesktopBrowserState
   isMaximized: boolean
@@ -263,6 +276,10 @@ export interface DesktopBridge {
   installHarnessVersion(version: string): Promise<void>
   openHarnessRelease(version: string): Promise<void>
   restartToApplyUpdate(): Promise<void>
+  checkForDesktopUpdate(): Promise<void>
+  downloadDesktopUpdate(): Promise<void>
+  openDesktopRelease(): Promise<void>
+  installDesktopUpdate(): Promise<void>
   chooseDevelopmentPatch(): Promise<void>
   clearDevelopmentPatch(): Promise<void>
   restartHarnessForDevelopment(): Promise<void>

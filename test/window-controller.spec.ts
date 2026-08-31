@@ -6,6 +6,8 @@ const electronMocks = vi.hoisted(() => ({
   clipboardWriteImage: vi.fn(),
   clipboardWriteText: vi.fn(),
   shellOpenExternal: vi.fn(),
+  shellOpenPath: vi.fn(async () => ''),
+  appQuit: vi.fn(),
   nativeImageCreateFromDataURL: vi.fn(),
   ipcHandlers: new Map<string, (...args: unknown[]) => unknown>(),
   window: undefined as undefined | {
@@ -73,6 +75,7 @@ vi.mock('electron', async () => {
       isPackaged: false,
       getAppPath: () => process.cwd(),
       getVersion: () => '0.1.0',
+      quit: electronMocks.appQuit,
     },
     BrowserWindow: MockBrowserWindow,
     clipboard: {
@@ -88,7 +91,7 @@ vi.mock('electron', async () => {
     nativeImage: {
       createFromDataURL: electronMocks.nativeImageCreateFromDataURL.mockReturnValue(electronMocks.clipboardImage),
     },
-    shell: { openExternal: electronMocks.shellOpenExternal },
+    shell: { openExternal: electronMocks.shellOpenExternal, openPath: electronMocks.shellOpenPath },
   }
 })
 
@@ -133,6 +136,50 @@ describe('Harness release URL', () => {
 })
 
 describe('WindowController Harness reload', () => {
+  it('checks, downloads, and opens a prepared desktop installer only on explicit actions', async () => {
+    const runtime = Object.assign(new EventEmitter(), {
+      harnessHome: '/path/that/does/not/exist',
+      updateState: { status: 'idle', versions: [] },
+      checkForUpdates: vi.fn(),
+    })
+    const development = Object.assign(new EventEmitter(), {
+      state: { pnpmVersion: '11.19.0', restarting: false, commandRunning: false },
+      choosePatch: vi.fn(),
+      clearPatch: vi.fn(),
+      restartHarness: vi.fn(),
+      runPlugin: vi.fn(),
+    })
+    const desktopUpdates = Object.assign(new EventEmitter(), {
+      state: { status: 'ready', version: '0.1.1' },
+      releasesUrl: 'https://github.com/xiaoxiao44443/dfy-dsh-desktop/releases/tag/v0.1.1',
+      checkForUpdates: vi.fn(async () => undefined),
+      downloadUpdate: vi.fn(async () => undefined),
+      installerPath: vi.fn(async () => '/tmp/DFY-DSH-Desktop-0.1.1-macos-x64.dmg'),
+    })
+    const controller = new WindowController(
+      runtime as never,
+      development as never,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      desktopUpdates as never,
+    )
+    await controller.create()
+
+    const sender = electronMocks.window?.webContents
+    await electronMocks.ipcHandlers.get('desktop:check-application-update')?.({ sender })
+    await electronMocks.ipcHandlers.get('desktop:download-application-update')?.({ sender })
+    await electronMocks.ipcHandlers.get('desktop:open-application-release')?.({ sender })
+    await electronMocks.ipcHandlers.get('desktop:install-application-update')?.({ sender })
+
+    expect(desktopUpdates.checkForUpdates).toHaveBeenCalledTimes(1)
+    expect(desktopUpdates.downloadUpdate).toHaveBeenCalledTimes(1)
+    expect(electronMocks.shellOpenExternal).toHaveBeenCalledWith(desktopUpdates.releasesUrl)
+    expect(electronMocks.shellOpenPath).toHaveBeenCalledWith('/tmp/DFY-DSH-Desktop-0.1.1-macos-x64.dmg')
+    expect(electronMocks.appQuit).toHaveBeenCalledTimes(1)
+  })
+
   it('applies a prepared runtime by restarting only the Harness process', async () => {
     const restartHarness = vi.fn(async () => undefined)
     const runtime = Object.assign(new EventEmitter(), {

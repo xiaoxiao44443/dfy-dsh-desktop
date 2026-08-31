@@ -13,6 +13,7 @@ import { parsePluginInitializationFailure, type PluginRecoveryService } from './
 import { appendPluginContextMenuItems, BUILTIN_CONTEXT_MENU_ACTIONS, buildBuiltinContextMenuItems } from './context-menu.js'
 import { DEFAULT_BROWSER_SETTINGS, type DesktopBrowserService } from './desktop-browser.js'
 import type { DesktopApplicationMenuState } from '../shared/contracts.js'
+import type { DesktopUpdateService } from './desktop-update.js'
 
 const STATE_CHANNEL = 'desktop:state'
 const CONTEXT_MENU_CHANNEL = 'desktop:context-menu'
@@ -96,6 +97,9 @@ export class WindowController {
     private readonly pluginRecovery?: PluginRecoveryService,
     private readonly browser?: DesktopBrowserService,
     private readonly plugins?: PluginManagementService,
+    private readonly rendererUrl?: string,
+    private readonly desktopUpdates?: DesktopUpdateService,
+    private readonly prepareDesktopInstall?: () => Promise<void>,
   ) {
     this.runtime.on('update-state', () => this.publishState())
     this.runtime.on(RUNTIME_PREPARATION_PROGRESS_EVENT, (progress: unknown) => {
@@ -109,6 +113,7 @@ export class WindowController {
       this.publishState()
     })
     this.development.on('state', () => this.publishState())
+    this.desktopUpdates?.on('state', () => this.publishState())
     this.browser?.on('state', () => this.publishState())
     this.browser?.on('context-menu', (params: ContextMenuParams, contents: WebContents, source: 'floating' | 'page') => {
       void this.openBrowserContextMenu(params, contents, source)
@@ -234,8 +239,9 @@ export class WindowController {
     const rendererDevUrl = !app.isPackaged
       ? process.env.HARNESS_DESKTOP_RENDERER_URL
       : undefined
-    if (rendererDevUrl !== undefined) {
-      const url = new URL(rendererDevUrl)
+    const rendererUrl = rendererDevUrl ?? this.rendererUrl
+    if (rendererUrl !== undefined) {
+      const url = new URL(rendererUrl)
       url.searchParams.set('theme', this.theme)
       url.searchParams.set('platform', platform)
       await window.loadURL(url.toString())
@@ -370,6 +376,26 @@ export class WindowController {
       if (this.runtime.updateState.status !== 'ready') return
       await this.development.restartHarness()
     })
+    ipcMain.handle('desktop:check-application-update', (event) => {
+      if (event.sender !== this.window?.webContents) return
+      return this.desktopUpdates?.checkForUpdates()
+    })
+    ipcMain.handle('desktop:download-application-update', (event) => {
+      if (event.sender !== this.window?.webContents) return
+      return this.desktopUpdates?.downloadUpdate()
+    })
+    ipcMain.handle('desktop:open-application-release', async (event) => {
+      if (event.sender !== this.window?.webContents || this.desktopUpdates === undefined) return
+      await shell.openExternal(this.desktopUpdates.releasesUrl)
+    })
+    ipcMain.handle('desktop:install-application-update', async (event) => {
+      if (event.sender !== this.window?.webContents || this.desktopUpdates === undefined) return
+      const installerPath = await this.desktopUpdates.installerPath()
+      await this.prepareDesktopInstall?.()
+      const message = await shell.openPath(installerPath)
+      if (message.length > 0) throw new Error(`无法打开桌面端安装包：${message}`)
+      app.quit()
+    })
     ipcMain.handle('desktop:development-choose-patch', () => this.development.choosePatch())
     ipcMain.handle('desktop:development-clear-patch', () => this.development.clearPatch())
     ipcMain.handle('desktop:development-restart', () => this.development.restartHarness())
@@ -447,6 +473,7 @@ export class WindowController {
             ...(this.runtime.updateState.version === undefined ? {} : { updateVersion: this.runtime.updateState.version }),
             ...(this.runtime.updateState.latestVersion === undefined ? {} : { updateLatestVersion: this.runtime.updateState.latestVersion }),
             ...(this.runtime.updateState.progress === undefined ? {} : { updateProgress: this.runtime.updateState.progress }),
+            desktopUpdate: this.desktopUpdates?.state ?? { status: 'idle' },
             patchEnabled: Boolean(this.development.state.patchPath),
           }
         : undefined
@@ -934,6 +961,7 @@ export class WindowController {
       ...(updateVersions.length === 0 ? {} : { updateVersions }),
       ...(update.progress !== undefined ? { updateProgress: update.progress } : {}),
       ...(update.message !== undefined ? { updateMessage: update.message } : {}),
+      desktopUpdate: this.desktopUpdates?.state ?? { status: 'idle' },
       development: this.development.state,
       browser: this.browser?.state ?? {
         settings: { ...DEFAULT_BROWSER_SETTINGS },

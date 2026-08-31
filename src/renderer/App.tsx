@@ -92,6 +92,20 @@ function updatePresentation(state: DesktopState): {
   return result
 }
 
+function desktopUpdatePresentation(state: DesktopState): {
+  detail: string
+  dotClass: string
+} {
+  const update = state.desktopUpdate
+  if (update.status === 'ready') return { detail: '安装包已就绪', dotClass: 'item-dot active ready' }
+  if (update.status === 'available') return { detail: `可更新 ${update.version ?? ''}`.trim(), dotClass: 'item-dot active available' }
+  if (update.status === 'checking') return { detail: '正在检查…', dotClass: 'item-dot active busy' }
+  if (update.status === 'downloading') return { detail: `下载 ${update.progress ?? 0}%`, dotClass: 'item-dot active busy' }
+  if (update.status === 'current') return { detail: state.appVersion, dotClass: 'item-dot' }
+  if (update.status === 'error') return { detail: '检查失败', dotClass: 'item-dot active error' }
+  return { detail: state.appVersion, dotClass: 'item-dot' }
+}
+
 function formatReleaseDate(value?: string): string | undefined {
   if (value === undefined) return undefined
   const date = new Date(value)
@@ -239,6 +253,78 @@ function HarnessUpdatePanel({ open, state, onClose }: { open: boolean; state: De
         </section>
       </div>
       <footer className="dialog-actions"><button className="dialog-button secondary" type="button" onClick={onClose}>关闭</button>{state.updateStatus === 'ready' ? <button className="dialog-button primary" type="button" disabled={busy} onClick={() => void apply()}>重启 Harness 并应用 {state.updateVersion}</button> : <button className="dialog-button primary" type="button" disabled={busy} onClick={() => void refresh()}>{state.updateStatus === 'error' ? '重新检查' : '检查更新'}</button>}</footer>
+    </Modal>
+  )
+}
+
+function DesktopUpdatePanel({ open, state, onClose }: { open: boolean; state: DesktopState; onClose: () => void }): ReactNode {
+  const [actionPending, setActionPending] = useState(false)
+  const [actionError, setActionError] = useState<string>()
+  const update = state.desktopUpdate
+  const busy = update.status === 'checking' || update.status === 'downloading' || actionPending
+  const progress = Math.min(100, Math.max(0, update.progress ?? 0))
+
+  useEffect(() => {
+    if (!open) return
+    setActionError(undefined)
+    if (update.status === 'idle') {
+      void desktopApi.checkForDesktopUpdate().catch((error: unknown) => {
+        setActionError(error instanceof Error ? error.message : String(error))
+      })
+    }
+  }, [open, update.status])
+
+  const run = async (action: () => Promise<void>): Promise<void> => {
+    setActionPending(true)
+    setActionError(undefined)
+    try {
+      await action()
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setActionPending(false)
+    }
+  }
+
+  const statusTitle = update.status === 'checking' ? '正在检查桌面端版本'
+    : update.status === 'downloading' ? `正在下载 ${update.version ?? ''}`.trim()
+      : update.status === 'ready' ? `版本 ${update.version ?? ''} 已准备好`.trim()
+        : update.status === 'available' ? `发现版本 ${update.version ?? ''}`.trim()
+          : update.status === 'current' ? '当前已是最新版本'
+            : update.status === 'error' ? '桌面端更新检查失败'
+              : '尚未检查版本'
+  const installHint = state.platform === 'macos'
+    ? '打开 DMG 后，将应用拖入 Applications 并选择“替换”。'
+    : state.platform === 'windows'
+      ? '安装程序会在桌面端退出后覆盖当前版本。'
+      : '退出桌面端后使用安装包覆盖当前版本。'
+  const publishedAt = formatReleaseDate(update.publishedAt)
+
+  return (
+    <Modal open={open} className="desktop-update-dialog" labelledBy="desktop-update-title" closeLabel="关闭桌面端更新" onClose={onClose}>
+      <header className="dialog-header">
+        <div className="dialog-heading"><span className="update-dialog-icon" aria-hidden="true"><Download /></span><div><h2 id="desktop-update-title">桌面端更新</h2><p>只检查版本，确认后再下载安装包</p></div></div>
+        <button className="dialog-close" type="button" aria-label="关闭桌面端更新" title="关闭" onClick={onClose}><X /></button>
+      </header>
+      <div className="dialog-content desktop-update-content">
+        <div className="update-version-summary desktop-update-summary">
+          <section><span>当前版本</span><strong>{state.appVersion}</strong></section>
+          <section><span>可用版本</span><strong>{update.version ?? (update.status === 'checking' ? '检查中…' : '—')}</strong></section>
+        </div>
+        <section className={`update-status-card status-${update.status}`} aria-live="polite">
+          <div className="update-status-main"><div className="update-status-copy"><strong>{statusTitle}</strong><span>{update.message ?? '版本信息来自项目 GitHub Release'}</span></div>{update.releaseUrl === undefined ? null : <button className="update-latest-link" type="button" onClick={() => void desktopApi.openDesktopRelease()}>查看 Release</button>}</div>
+          {update.status === 'downloading' ? <div className="update-progress-row"><div className="update-progress-track"><span style={{ width: `${progress}%` }} /></div><output>{progress}%</output></div> : null}
+        </section>
+        {update.status === 'ready' ? <p className="desktop-update-hint">{installHint} 安装完成并首次启动新版本后，缓存安装包会自动清理。</p> : null}
+        {publishedAt === undefined ? null : <p className="desktop-update-date">发布时间：{publishedAt}</p>}
+        {actionError ? <p className="update-error" role="alert">{actionError}</p> : null}
+      </div>
+      <footer className="dialog-actions">
+        <button className="dialog-button secondary" type="button" onClick={onClose}>关闭</button>
+        {update.status === 'available' ? <button className="dialog-button primary" type="button" disabled={busy} onClick={() => void run(() => desktopApi.downloadDesktopUpdate())}>下载安装包</button>
+          : update.status === 'ready' ? <button className="dialog-button primary" type="button" disabled={busy} onClick={() => void run(() => desktopApi.installDesktopUpdate())}>退出并打开安装包</button>
+            : <button className="dialog-button primary" type="button" disabled={busy} onClick={() => void run(() => desktopApi.checkForDesktopUpdate())}>{update.status === 'checking' ? '正在检查…' : '检查更新'}</button>}
+      </footer>
     </Modal>
   )
 }
@@ -742,6 +828,7 @@ export function App(): ReactNode {
   const [menuOpen, setMenuOpen] = useState(false)
   const [releaseNotesOpen, setReleaseNotesOpen] = useState(false)
   const [updateOpen, setUpdateOpen] = useState(false)
+  const [desktopUpdateOpen, setDesktopUpdateOpen] = useState(false)
   const [developmentOpen, setDevelopmentOpen] = useState(false)
   const [pluginManagerOpen, setPluginManagerOpen] = useState(false)
   const [startupActionPending, setStartupActionPending] = useState(false)
@@ -793,6 +880,7 @@ export function App(): ReactNode {
     else if (action === 'development') setDevelopmentOpen(true)
     else if (action === 'release-notes') setReleaseNotesOpen(true)
     else if (action === 'update') setUpdateOpen(true)
+    else if (action === 'desktop-update') setDesktopUpdateOpen(true)
   }), [])
 
   useEffect(() => desktopApi.onPointerInput(({ x, y }) => {
@@ -833,6 +921,7 @@ export function App(): ReactNode {
       if (event.key !== 'Escape') return
       if (pluginManagerOpen) setPluginManagerOpen(false)
       else if (developmentOpen) setDevelopmentOpen(false)
+      else if (desktopUpdateOpen) setDesktopUpdateOpen(false)
       else if (updateOpen) setUpdateOpen(false)
       else if (releaseNotesOpen) setReleaseNotesOpen(false)
       else if (menuOpen) setMenuOpen(false)
@@ -843,7 +932,7 @@ export function App(): ReactNode {
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-  }, [browserDisplayMenuOpen, browserSettingsMenuOpen, developmentOpen, menuOpen, pluginManagerOpen, releaseNotesOpen, updateOpen])
+  }, [browserDisplayMenuOpen, browserSettingsMenuOpen, desktopUpdateOpen, developmentOpen, menuOpen, pluginManagerOpen, releaseNotesOpen, updateOpen])
 
   useEffect(() => { if (releaseNotesOpen) releaseCloseButton.current?.focus({ preventScroll: true }) }, [releaseNotesOpen])
 
@@ -856,6 +945,7 @@ export function App(): ReactNode {
     if (state?.harnessUrl) harnessFrame.current?.focus({ preventScroll: true })
   }, [state?.harnessUrl])
   const update = useMemo(() => state === undefined ? undefined : updatePresentation(state), [state])
+  const desktopUpdate = useMemo(() => state === undefined ? undefined : desktopUpdatePresentation(state), [state])
   const ready = state?.harnessLifecycle === 'ready'
   const preparingRuntime = state?.harnessLifecycle === 'starting' && state.harnessVersion === undefined
   const runtimePreparationProgress = preparingRuntime ? state?.runtimePreparationProgress : undefined
@@ -865,7 +955,7 @@ export function App(): ReactNode {
   const pluginFailure = state?.pluginFailure
   const browserOpen = state?.browser.panelOpen === true && state.browser.settings.enabled
   const browserDisplayMode: BrowserDisplayMode = state?.browser.settings.displayMode ?? 'split'
-  const browserModalOpen = releaseNotesOpen || updateOpen || developmentOpen || pluginManagerOpen
+  const browserModalOpen = releaseNotesOpen || updateOpen || desktopUpdateOpen || developmentOpen || pluginManagerOpen
   const browserPanelOpen = browserOpen && browserDisplayMode !== 'floating'
   const browserMenuOpen = browserDisplayMenuOpen || browserSettingsMenuOpen
   const browserDisplayModeLabel = browserDisplayMode === 'split' ? '分栏' : browserDisplayMode === 'drawer' ? '抽屉' : '独立窗口'
@@ -1443,7 +1533,7 @@ export function App(): ReactNode {
         </div>
       </header>
 
-      {menuOpen && state !== undefined && update !== undefined ? (
+      {menuOpen && state !== undefined && update !== undefined && desktopUpdate !== undefined ? (
         <section id="title-menu-popover" className={`menu-card${shellMenuPresentationPending ? ' shell-overlay-pending' : ''}${browserShellOverlayActive ? ' shell-overlay-synchronized' : ''}`} role="menu" aria-label="DFY DSH Desktop 应用菜单">
           <div className="menu-list">
             <button id="development-action" className="menu-item" type="button" role="menuitem" onClick={(event) => { event.currentTarget.blur(); setMenuOpen(false); setDevelopmentOpen(true) }}><span className="item-label">开发工具</span><span className="item-meta">{patchEnabled ? 'Patch 已启用' : 'Patch 与 CLI'}</span><span className="item-dot" aria-hidden="true" /></button>
@@ -1451,7 +1541,7 @@ export function App(): ReactNode {
             <button id="update-action" className="menu-item" type="button" role="menuitem" disabled={update.disabled} onClick={(event) => { event.currentTarget.blur(); setMenuOpen(false); setUpdateOpen(true) }}><span id="update-title" className="item-label">{update.title}</span><span className="item-meta">{update.detail}</span><span className={update.dotClass} aria-hidden="true" /></button>
             <button className="menu-item" type="button" role="menuitem" onClick={(event) => { event.currentTarget.blur(); setMenuOpen(false); setReleaseNotesOpen(true) }}><span className="item-label">版本说明与变更记录</span><span className="item-meta">{state.harnessVersion ?? '尚未启动'}</span></button>
           </div>
-          <footer className="menu-footer"><span>桌面端版本</span><span id="version-label">{state.appVersion}</span></footer>
+          <footer className="menu-footer"><button type="button" role="menuitem" aria-label={`桌面端更新，${desktopUpdate.detail}`} onClick={(event) => { event.currentTarget.blur(); setMenuOpen(false); setDesktopUpdateOpen(true) }}><span>桌面端版本</span><span className="menu-footer-meta"><span id="version-label">{desktopUpdate.detail}</span>{desktopUpdate.dotClass === 'item-dot' ? null : <span className={desktopUpdate.dotClass} aria-hidden="true" />}</span></button></footer>
         </section>
       ) : null}
 
@@ -1477,6 +1567,7 @@ export function App(): ReactNode {
       </Modal>
 
       {state !== undefined ? <HarnessUpdatePanel open={updateOpen} state={state} onClose={() => { setUpdateOpen(false); requestAnimationFrame(focusHarness) }} /> : null}
+      {state !== undefined ? <DesktopUpdatePanel open={desktopUpdateOpen} state={state} onClose={() => { setDesktopUpdateOpen(false); requestAnimationFrame(focusHarness) }} /> : null}
       {state !== undefined ? <PluginManager open={pluginManagerOpen} harnessReady={ready} restarting={state.development.restarting} onClose={() => { setPluginManagerOpen(false); requestAnimationFrame(focusHarness) }} /> : null}
       {state !== undefined ? <DevelopmentPanel open={developmentOpen} state={state.development} harnessUrl={state.harnessUrl} disabledPlugins={state.disabledPlugins} harnessReady={ready} onClose={() => { setDevelopmentOpen(false); requestAnimationFrame(focusHarness) }} /> : null}
     </>
