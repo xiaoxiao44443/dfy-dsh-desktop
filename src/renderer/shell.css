@@ -1329,6 +1329,13 @@ body.maximized .restore-icon { display: block; }
 .update-status-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 4px; }
 .update-status-card strong { font-size: 13px; font-weight: 600; }
 .update-status-card span { overflow: hidden; color: var(--menu-muted); font-size: 12px; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
+.update-status-card.status-error span {
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: initial;
+  white-space: pre-wrap;
+  user-select: text;
+}
 .update-status-card.status-error { border-color: rgba(226, 75, 85, 0.3); background: rgba(226, 75, 85, 0.08); }
 .update-status-card.status-ready { border-color: rgba(47, 166, 111, 0.3); background: rgba(47, 166, 111, 0.08); }
 .update-latest-actions { display: flex; flex: none; align-items: center; gap: 10px; }
@@ -1493,9 +1500,9 @@ body.maximized .restore-icon { display: block; }
 .update-release-tags { display: flex; min-width: 0; align-items: center; justify-content: flex-end; gap: 5px; }
 .update-release-tags span { padding: 2px 6px; color: var(--menu-muted); border: 1px solid var(--menu-border); border-radius: 999px; font-size: 10px; }
 .update-release-tags .selected { color: #74d8a5; border-color: rgba(47, 166, 111, 0.34); background: rgba(47, 166, 111, 0.1); }
-.update-release-actions { display: grid; grid-template-columns: 84px; align-items: center; justify-content: end; }
+.update-release-actions { display: grid; grid-template-columns: 96px; align-items: center; justify-content: end; }
 .update-release-actions > button {
-  width: 84px;
+  width: 96px;
   min-height: 30px;
   padding: 0 10px;
   color: var(--menu-text);
@@ -1503,6 +1510,7 @@ body.maximized .restore-icon { display: block; }
   border-radius: 6px;
   background: var(--menu-hover);
   font-size: 11.5px;
+  white-space: nowrap;
 }
 .update-release-actions > button:hover:not(:disabled) { background: var(--menu-active); }
 .update-release-actions > button.primary { color: var(--dialog-primary-text); border-color: transparent; background: var(--dialog-primary-bg); }

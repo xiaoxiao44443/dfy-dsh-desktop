@@ -11,11 +11,13 @@ import { x as extractTar } from 'tar'
 import type { HarnessReleaseVersion, HarnessUpdateStatus } from '../shared/contracts.js'
 import { readRuntimeState, writeRuntimeState, type HarnessRuntimeState } from './runtime-state.js'
 import { applyHarnessRuntimeCompatibility } from './runtime-compat.js'
+import { prependToolchainToPath } from './harness-toolchain.js'
 
 const require = createRequire(import.meta.url)
 const HARNESS_PACKAGE = '@deepseek-ai/dsh'
 export const DESKTOP_PNPM_VERSION = '11.19.0'
 export const DESKTOP_KOFFI_VERSION = '3.1.6'
+const PNPM_MINIMUM_RELEASE_AGE_CONFIG = '--config.minimum-release-age=0'
 const BUNDLED_RUNTIME_POLICY_VERSION = 6
 const REGISTRY_METADATA = 'https://registry.npmjs.org/@deepseek-ai%2Fdsh'
 const UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000
@@ -59,6 +61,39 @@ interface RegistryCatalog {
 export function bundledArchiveProgress(bytesRead: number, totalBytes: number): number {
   if (!Number.isFinite(bytesRead) || !Number.isFinite(totalBytes) || totalBytes <= 0) return 0
   return Math.min(99, Math.max(0, Math.floor((bytesRead / totalBytes) * 100)))
+}
+
+export function pnpmInstallProgress(output: string): number | undefined {
+  const packageMatches = [...output.matchAll(/Packages:\s+\+(\d+)/gu)]
+  const progressMatches = [...output.matchAll(/Progress:[^\r\n]*\badded\s+(\d+)/gu)]
+  const total = Number(packageMatches.at(-1)?.[1])
+  const added = Number(progressMatches.at(-1)?.[1])
+  if (!Number.isFinite(total) || total <= 0 || !Number.isFinite(added) || added < 0) return undefined
+  return 18 + Math.floor((Math.min(added, total) / total) * 62)
+}
+
+export function runtimeCommandErrorDetail(stdout: string, stderr: string): string {
+  const clean = (output: string): string[] => {
+    const lines = output
+      .replace(/\u001B\[[0-?]*[ -\/]*[@-~]/gu, '')
+      .split(/[\r\n]+/u)
+      .map((line) => line.trim())
+      .filter((line) => (
+        line.length > 0
+        && !/^Progress:/u.test(line)
+        && !/^Packages:\s+\+\d+/u.test(line)
+        && !/^\+{10,}$/u.test(line)
+        && !/^Packages are copied from /u.test(line)
+        && !/^Content-addressable store is at:/u.test(line)
+        && !/^Virtual store is at:/u.test(line)
+      ))
+    return lines.filter((line, index) => line !== lines[index - 1])
+  }
+
+  const stderrLines = clean(stderr)
+  const detailLines = stderrLines.length > 0 ? stderrLines : clean(stdout)
+  if (detailLines.length === 0) return '命令异常退出，未返回具体错误；请重试。'
+  return detailLines.slice(-12).join('\n').slice(-2_000)
 }
 
 /**
@@ -112,6 +147,7 @@ export class HarnessRuntimeManager extends EventEmitter {
   private readonly statePath: string
   private readonly packageStore: string
   private readonly legacyNpmCache: string
+  private readonly toolchainBinPath: string
   private state: HarnessRuntimeState | undefined
   private bundled: HarnessRuntimeCandidate | undefined
   private updateView: RuntimeUpdateView = { status: 'idle', versions: [] }
@@ -134,6 +170,7 @@ export class HarnessRuntimeManager extends EventEmitter {
     this.statePath = join(this.runtimeRoot, 'state.json')
     this.packageStore = join(this.runtimeRoot, 'package-store')
     this.legacyNpmCache = join(this.runtimeRoot, 'npm-cache')
+    this.toolchainBinPath = join(userDataPath, 'harness-toolchain', 'bin')
   }
 
   async initialize(): Promise<void> {
@@ -436,10 +473,14 @@ export class HarnessRuntimeManager extends EventEmitter {
     }
 
     const stagingPath = join(this.stagingRoot, `${version}-${Date.now()}-${process.pid}`)
+    let installed = false
     onProgress(5, '正在准备下载目录…')
     await mkdir(stagingPath, { recursive: true })
     try {
-      await this.resetPackageStore()
+      // Keep verified pnpm store entries after a failed attempt so a manual
+      // retry only fetches missing packages. Startup cleanup and a successful
+      // install still remove the temporary store.
+      await mkdir(this.packageStore, { recursive: true })
       await writeFile(join(stagingPath, 'package.json'), `${JSON.stringify({
         name: 'dfy-dsh-desktop-managed-runtime',
         private: true,
@@ -456,11 +497,27 @@ export class HarnessRuntimeManager extends EventEmitter {
         '',
       ].join('\n'), 'utf8')
       onProgress(18, '正在通过内置 pnpm 下载并安装…')
-      await this.runNode(this.resolvePnpmCli(), [
-        'install', '--dir', stagingPath, '--prod', '--no-lockfile', '--prefer-offline',
+      let pnpmOutput = ''
+      let reportedInstallProgress = 18
+      const installArgs = [
+        'install', PNPM_MINIMUM_RELEASE_AGE_CONFIG, '--dir', stagingPath, '--prod', '--no-lockfile', '--prefer-offline',
         '--store-dir', this.packageStore, '--package-import-method', 'copy',
         '--config.node-linker=hoisted',
-      ])
+      ]
+      const captureInstallOutput = (chunk: string): void => {
+        pnpmOutput = `${pnpmOutput}${chunk}`.slice(-16_000)
+        const progress = pnpmInstallProgress(pnpmOutput)
+        if (progress === undefined || progress <= reportedInstallProgress) return
+        reportedInstallProgress = progress
+        onProgress(progress, '正在通过内置 pnpm 下载并安装…')
+      }
+      try {
+        await this.runNode(this.resolvePnpmCli(), installArgs, captureInstallOutput)
+      } catch {
+        onProgress(reportedInstallProgress, '下载中断，正在自动重试…')
+        pnpmOutput = ''
+        await this.runNode(this.resolvePnpmCli(), installArgs, captureInstallOutput)
+      }
       onProgress(82, '下载完成，正在检查运行时文件…')
       const stagedEntry = join(stagingPath, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
       const stagedPnpmEntry = join(stagingPath, 'node_modules', 'pnpm', 'bin', 'pnpm.cjs')
@@ -470,20 +527,22 @@ export class HarnessRuntimeManager extends EventEmitter {
       await this.runNode(stagedEntry, ['--version'])
       await rm(finalPath, { recursive: true, force: true })
       await rename(stagingPath, finalPath)
+      installed = true
       onProgress(98, '正在保存已下载版本…')
     } catch (error) {
       await rm(stagingPath, { recursive: true, force: true })
       throw error
     } finally {
-      await this.removePath(this.packageStore)
+      if (installed) await this.removePath(this.packageStore)
     }
   }
 
-  private runNode(entryPath: string, args: string[]): Promise<void> {
+  private runNode(entryPath: string, args: string[], onOutput: (chunk: string) => void = () => undefined): Promise<void> {
     return new Promise((resolve, reject) => {
+      const environment = prependToolchainToPath(process.env, this.toolchainBinPath)
       const child = spawn(this.electronExecutable, [entryPath, ...args], {
         env: {
-          ...process.env,
+          ...environment,
           ELECTRON_RUN_AS_NODE: '1',
           ELECTRON_NO_ATTACH_CONSOLE: '1',
           CI: 'true',
@@ -492,12 +551,23 @@ export class HarnessRuntimeManager extends EventEmitter {
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
       })
+      let stdout = ''
       let stderr = ''
-      child.stderr?.on('data', (chunk: Buffer) => { stderr = `${stderr}${chunk.toString('utf8')}`.slice(-8_000) })
+      const captureOutput = (source: 'stdout' | 'stderr', chunk: Buffer): void => {
+        const text = chunk.toString('utf8')
+        if (source === 'stdout') stdout = `${stdout}${text}`.slice(-8_000)
+        else stderr = `${stderr}${text}`.slice(-8_000)
+        onOutput(text)
+      }
+      child.stdout?.on('data', (chunk: Buffer) => captureOutput('stdout', chunk))
+      child.stderr?.on('data', (chunk: Buffer) => captureOutput('stderr', chunk))
       child.once('error', reject)
       child.once('exit', (code, signal) => {
         if (code === 0) resolve()
-        else reject(new Error(`runtime command failed (${String(code ?? signal)}): ${stderr.trim()}`))
+        else {
+          const detail = runtimeCommandErrorDetail(stdout, stderr)
+          reject(new Error(`runtime command failed (${String(code ?? signal)}):\n${detail}`))
+        }
       })
     })
   }
@@ -657,11 +727,6 @@ export class HarnessRuntimeManager extends EventEmitter {
       if (versionsToKeep.has(entry.name)) return
       await this.removePath(join(this.versionsRoot, entry.name))
     }))
-  }
-
-  private async resetPackageStore(): Promise<void> {
-    await this.removePath(this.packageStore)
-    await mkdir(this.packageStore, { recursive: true })
   }
 
   private async removePath(path: string): Promise<void> {

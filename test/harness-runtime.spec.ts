@@ -6,8 +6,10 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   bundledArchiveProgress,
   HarnessRuntimeManager,
+  pnpmInstallProgress,
   repairWindowsPnpmArchiveLinks,
   RUNTIME_PREPARATION_PROGRESS_EVENT,
+  runtimeCommandErrorDetail,
 } from '../src/main/harness-runtime.js'
 
 async function writeRuntimeFixture(root: string, version: string): Promise<void> {
@@ -74,6 +76,42 @@ describe('bundled Harness archive progress', () => {
     } finally {
       await rm(root, { recursive: true, force: true })
     }
+  })
+})
+
+describe('managed Harness install progress', () => {
+  it('maps pnpm package installation into the download stage', () => {
+    const output = [
+      'Packages: +500',
+      'Progress: resolved 560, reused 0, downloaded 100, added 25',
+      'Progress: resolved 560, reused 0, downloaded 300, added 250',
+    ].join('\n')
+
+    expect(pnpmInstallProgress(output)).toBe(49)
+    expect(pnpmInstallProgress(`${output}\nProgress: resolved 560, reused 0, downloaded 500, added 500`)).toBe(80)
+    expect(pnpmInstallProgress('Progress: resolved 10, added 2')).toBeUndefined()
+  })
+
+  it('removes pnpm progress noise from command errors', () => {
+    const stdout = [
+      '++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++',
+      'Packages are copied from the content-addressable store to the virtual store.',
+      'Content-addressable store is at: /tmp/package-store/v11',
+      'Virtual store is at: node_modules/.pnpm',
+      'Progress: resolved 1, reused 0, downloaded 0, added 0',
+      'Packages: +500',
+      'Progress: resolved 560, reused 400, downloaded 12, added 390',
+    ].join('\r')
+    const stderr = [
+      '\u001B[31mERR_PNPM_META_FETCH_FAIL\u001B[39m GET https://registry.example/package',
+      'request failed: socket hang up',
+    ].join('\n')
+
+    expect(runtimeCommandErrorDetail(stdout, stderr)).toBe([
+      'ERR_PNPM_META_FETCH_FAIL GET https://registry.example/package',
+      'request failed: socket hang up',
+    ].join('\n'))
+    expect(runtimeCommandErrorDetail(stdout, '')).toBe('命令异常退出，未返回具体错误；请重试。')
   })
 })
 
