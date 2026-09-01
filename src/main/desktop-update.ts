@@ -51,6 +51,7 @@ export interface DesktopUpdateOptions {
   releasesApiUrl?: string
   releasesPageUrl?: string
   allowLoopbackHttp?: boolean
+  removeUpdatePath?: (path: string) => Promise<void>
 }
 
 function errorMessage(error: unknown): string {
@@ -115,6 +116,7 @@ export class DesktopUpdateService extends EventEmitter {
   private readonly releasesApiUrl: string
   private readonly releasesPageUrl: string
   private readonly allowLoopbackHttp: boolean
+  private readonly removeUpdatePath: (path: string) => Promise<void>
 
   constructor(private readonly options: DesktopUpdateOptions) {
     super()
@@ -122,6 +124,9 @@ export class DesktopUpdateService extends EventEmitter {
     this.arch = options.arch ?? process.arch
     this.fetcher = options.fetcher ?? globalThis.fetch
     this.allowLoopbackHttp = options.allowLoopbackHttp === true
+    this.removeUpdatePath = options.removeUpdatePath ?? (async (path) => {
+      await rm(path, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
+    })
     this.releasesApiUrl = options.releasesApiUrl ?? RELEASES_API_URL
     this.releasesPageUrl = options.releasesPageUrl ?? RELEASES_PAGE_URL
     if (semver.valid(options.currentVersion) === null) {
@@ -144,9 +149,9 @@ export class DesktopUpdateService extends EventEmitter {
   async initialize(): Promise<void> {
     await mkdir(this.options.updatesRoot, { recursive: true })
     const pending = await this.readPending()
-    if (pending === undefined) await rm(join(this.options.updatesRoot, PENDING_FILE), { force: true })
+    if (pending === undefined) await this.removeOnStartup(join(this.options.updatesRoot, PENDING_FILE))
     if (pending !== undefined && semver.gte(this.options.currentVersion, pending.version)) {
-      await this.removePending(pending)
+      await this.removePendingOnStartup(pending)
     } else if (pending !== undefined) {
       const path = this.pendingInstallerPath(pending)
       try {
@@ -159,7 +164,7 @@ export class DesktopUpdateService extends EventEmitter {
           message: '安装包已下载，可以退出桌面端后覆盖安装。',
         })
       } catch {
-        await this.removePending(pending)
+        await this.removePendingOnStartup(pending)
       }
     }
     await this.cleanupUpdateDirectories(this.pending?.version)
@@ -408,12 +413,30 @@ export class DesktopUpdateService extends EventEmitter {
     this.pending = undefined
   }
 
+  private async removePendingOnStartup(pending: PendingDesktopUpdate): Promise<void> {
+    // On Windows the newly installed app may start before NSIS releases its
+    // executable in this directory. Clear the consumed marker first, then let
+    // best-effort startup cleanup retry the locked installer on a later launch.
+    this.pending = undefined
+    await this.removeOnStartup(join(this.options.updatesRoot, PENDING_FILE))
+    await this.removeOnStartup(join(this.options.updatesRoot, pending.version))
+  }
+
+  private async removeOnStartup(path: string): Promise<void> {
+    try {
+      await this.removeUpdatePath(path)
+    } catch {
+      // A stale or locked installer must never prevent the desktop app from
+      // starting. Directories left behind are retried on the next launch.
+    }
+  }
+
   private async cleanupUpdateDirectories(keepVersion?: string): Promise<void> {
     const entries = await readdir(this.options.updatesRoot, { withFileTypes: true })
     await Promise.all(entries.map(async (entry) => {
       if (entry.name === PENDING_FILE || entry.name === `${PENDING_FILE}.tmp`) return
       if (entry.isDirectory() && entry.name === keepVersion) return
-      await rm(join(this.options.updatesRoot, entry.name), { recursive: true, force: true })
+      await this.removeOnStartup(join(this.options.updatesRoot, entry.name))
     }))
   }
 

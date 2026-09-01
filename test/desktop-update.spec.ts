@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -106,6 +106,40 @@ describe('DesktopUpdateService', () => {
     })
     await upgraded.initialize()
     expect(await readdir(root)).toEqual([])
+  })
+
+  it('does not fail startup when the completed Windows installer is still locked', async () => {
+    const root = await updateRoot()
+    const version = '0.1.2-alpha.3'
+    const versionRoot = join(root, version)
+    const installerName = `DFY-DSH-Desktop-${version}-x64.exe`
+    await mkdir(versionRoot, { recursive: true })
+    await writeFile(join(versionRoot, installerName), 'locked installer')
+    await writeFile(join(root, 'pending.json'), `${JSON.stringify({
+      version,
+      assetName: installerName,
+      downloadedAt: '2026-09-01T00:00:00.000Z',
+    })}\n`)
+    const removeUpdatePath = vi.fn(async (path: string) => {
+      if (path === versionRoot) {
+        const error = new Error('resource busy or locked') as NodeJS.ErrnoException
+        error.code = 'EBUSY'
+        throw error
+      }
+      await rm(path, { recursive: true, force: true })
+    })
+    const service = new DesktopUpdateService({
+      updatesRoot: root,
+      currentVersion: version,
+      platform: 'win32',
+      arch: 'x64',
+      removeUpdatePath,
+    })
+
+    await expect(service.initialize()).resolves.toBeUndefined()
+    expect(service.state.status).toBe('idle')
+    expect(await readdir(root)).toEqual([version])
+    expect(removeUpdatePath).toHaveBeenCalledWith(versionRoot)
   })
 
   it('does not offer prerelease builds to a stable desktop version', async () => {
