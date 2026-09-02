@@ -1456,7 +1456,7 @@ body.maximized .restore-icon { display: block; }
 .update-release-row {
   display: grid;
   min-height: 58px;
-  grid-template-columns: minmax(180px, 1fr) 108px 84px;
+  grid-template-columns: minmax(180px, 1fr) 108px 96px;
   align-items: center;
   gap: 12px;
   padding: 8px 10px 8px 13px;
@@ -2419,7 +2419,7 @@ body.maximized .restore-icon { display: block; }
 :root[data-theme="light"] .command-output.error { color: #b52f3b; }
 
 @media (max-width: 720px) {
-  .update-release-row { grid-template-columns: minmax(160px, 1fr) 84px; }
+  .update-release-row { grid-template-columns: minmax(160px, 1fr) 96px; }
   .update-release-tags { display: none; }
   .command-fields { grid-template-columns: 1fr; }
   .patch-picker { grid-template-columns: minmax(0, 1fr) auto; }
