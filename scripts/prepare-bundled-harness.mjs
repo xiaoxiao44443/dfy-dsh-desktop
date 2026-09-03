@@ -99,6 +99,7 @@ if (!runtimeReady) {
     '--store-dir', storeRoot,
     '--package-import-method', 'copy',
     '--config.node-linker=hoisted',
+    '--config.minimum-release-age-exclude=*',
   ], {
     cwd: projectRoot,
     env: {
