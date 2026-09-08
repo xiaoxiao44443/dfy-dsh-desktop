@@ -273,6 +273,7 @@ if (!app.requestSingleInstanceLock()) {
       profilePath: join(runtime.harnessHome, 'profiles', 'web'),
       notifications,
       browser,
+      openPath: (path) => shell.openPath(path),
       revealPath: (path) => shell.showItemInFolder(path),
       restartHarness: async () => {
         if (development === undefined) throw new Error('Harness 开发服务尚未准备完成。')

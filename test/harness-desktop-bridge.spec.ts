@@ -18,6 +18,7 @@ describe('HarnessDesktopBridgeHost', () => {
     const userDataPath = await mkdtemp(join(tmpdir(), 'dsh-desktop-bridge-'))
     temporaryPaths.push(userDataPath)
     const restartHarness = vi.fn(async () => undefined)
+    const openPath = vi.fn(async () => '')
     const revealPath = vi.fn()
     const notifications = {
       currentSettings: { turnCompletion: 'unfocused', permissionRequests: true, questions: true },
@@ -50,6 +51,7 @@ describe('HarnessDesktopBridgeHost', () => {
       profilePath: '/private/example/.dsh/profiles/web',
       notifications: notifications as never,
       browser: browser as never,
+      openPath,
       revealPath,
       restartHarness,
       restartDelayMs: 5,
@@ -119,6 +121,18 @@ describe('HarnessDesktopBridgeHost', () => {
     })
     expect(shown.status).toBe(200)
     expect(notifications.show).toHaveBeenCalledWith({ kind: 'question', sessionId: 'session-1' })
+
+    const openedPath = join(userDataPath, 'folder')
+    const opened = await fetch(`${controlOrigin}/v1/shell/open`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${launch.controlToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ path: openedPath }),
+    })
+    expect(opened.status).toBe(200)
+    expect(openPath).toHaveBeenCalledWith(openedPath)
 
     const revealedPath = join(userDataPath, 'artifact.txt')
     const revealed = await fetch(`${controlOrigin}/v1/shell/reveal`, {
@@ -264,10 +278,11 @@ describe('dsh-desktop-bridge tool', () => {
       profilePath,
     })
 
-    expect(registerRoute).toHaveBeenCalledTimes(3)
+    expect(registerRoute).toHaveBeenCalledTimes(4)
     expect(registerRoute.mock.calls.map(([route]) => route.path)).toEqual([
       '/api/dsh-desktop/notifications/settings',
       '/api/dsh-desktop/notifications/show',
+      '/api/dsh-desktop/shell/open',
       '/api/dsh-desktop/shell/reveal',
     ])
 
