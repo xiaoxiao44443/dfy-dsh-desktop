@@ -1241,12 +1241,6 @@ body.maximized .restore-icon { display: block; }
 .dialog-button:disabled { opacity: 0.52; pointer-events: none; }
 
 .desktop-update-dialog { width: min(520px, calc(100vw - 40px)); }
-.desktop-update-content {
-  display: flex;
-  flex-direction: column;
-  gap: 13px;
-  padding: 16px 18px;
-}
 .desktop-update-summary section { min-height: 66px; }
 .desktop-update-hint,
 .desktop-update-date {
@@ -1280,7 +1274,13 @@ body.maximized .restore-icon { display: block; }
 
 .update-dialog-icon svg { width: 21px; height: 21px; stroke-width: 1.7; }
 
-.update-content {
+.update-dialog > .dialog-header,
+.update-dialog > .dialog-actions,
+.desktop-update-dialog > .dialog-header,
+.desktop-update-dialog > .dialog-actions { flex-shrink: 0; }
+
+.update-content,
+.desktop-update-content {
   display: flex;
   min-height: 0;
   flex: 1;
@@ -1291,6 +1291,9 @@ body.maximized .restore-icon { display: block; }
   scrollbar-color: color-mix(in srgb, var(--menu-text) 42%, transparent) transparent;
   scrollbar-width: thin;
 }
+
+.update-content > *,
+.desktop-update-content > * { flex-shrink: 0; }
 
 .update-version-summary {
   display: grid;
@@ -1329,12 +1332,16 @@ body.maximized .restore-icon { display: block; }
 .update-status-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 4px; }
 .update-status-card strong { font-size: 13px; font-weight: 600; }
 .update-status-card span { overflow: hidden; color: var(--menu-muted); font-size: 12px; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
-.update-status-card.status-error span {
-  overflow: visible;
+.update-status-card.status-error .update-status-copy > span,
+.update-error {
+  max-height: min(240px, 30vh);
+  overflow: auto;
   overflow-wrap: anywhere;
   text-overflow: initial;
   white-space: pre-wrap;
   user-select: text;
+  scrollbar-color: color-mix(in srgb, var(--menu-text) 42%, transparent) transparent;
+  scrollbar-width: thin;
 }
 .update-status-card.status-error { border-color: rgba(226, 75, 85, 0.3); background: rgba(226, 75, 85, 0.08); }
 .update-status-card.status-ready { border-color: rgba(47, 166, 111, 0.3); background: rgba(47, 166, 111, 0.08); }
