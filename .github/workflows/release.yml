@@ -23,6 +23,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout release notes
+        uses: actions/checkout@v7
+
       - name: Download packaged applications
         uses: actions/download-artifact@v8
         with:
@@ -45,16 +48,24 @@ jobs:
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then
             prerelease+=(--prerelease)
           fi
+          notes_file=".github/release-notes/${GITHUB_REF_NAME}.md"
+          notes=(--generate-notes)
+          if [[ -f "$notes_file" ]]; then
+            notes=(--notes-file "$notes_file")
+          fi
 
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" release-assets/* \
               --repo "$GITHUB_REPOSITORY" \
               --clobber
+            if [[ -f "$notes_file" ]]; then
+              gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --notes-file "$notes_file"
+            fi
           else
             gh release create "$GITHUB_REF_NAME" release-assets/* \
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
-              --generate-notes \
+              "${notes[@]}" \
               --title "DFY DSH Desktop ${GITHUB_REF_NAME#v}" \
               "${prerelease[@]}"
           fi

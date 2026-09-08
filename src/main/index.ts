@@ -11,6 +11,7 @@ import type { DevelopmentSettings } from './development-settings.js'
 import { HarnessDesktopBridgeHost } from './harness-desktop-bridge.js'
 import { DesktopNotificationService } from './desktop-notifications.js'
 import { PluginInitializationError, PluginRecoveryService } from './plugin-recovery.js'
+import { DesktopPluginLinkError } from './harness-plugin-links.js'
 import { DesktopBrowserService } from './desktop-browser.js'
 import { DshCliIntegration } from './dsh-cli-integration.js'
 import { PluginManagementService } from './plugin-management.js'
@@ -155,6 +156,7 @@ if (!app.requestSingleInstanceLock()) {
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
           failures.push(`${candidate.version} (${candidate.source}): ${message}`)
+          if (error instanceof DesktopPluginLinkError) break
           if (error instanceof PluginInitializationError) {
             pluginFailure = error
             break

@@ -111,8 +111,9 @@ syncBuiltinESMExports()
  * The active DSH Profile is the ESM import base for loader entries, so Node's
  * legacy NODE_PATH cannot expose an app-bundled package to it. Keep the bridge
  * package outside ~/.dsh and resolve only its three public entry points here.
- * This preserves a real package name for DSH's client-module inventory while
- * avoiding any mutation of the user's Profile dependencies.
+ * The desktop launch also maintains Profile node_modules links for DSH's
+ * filesystem-based package inventory. This resolver keeps client entry points
+ * stable even while a package manager is replacing those links.
  */
 function registerDesktopBridgeResolver(): void {
   const roots = [

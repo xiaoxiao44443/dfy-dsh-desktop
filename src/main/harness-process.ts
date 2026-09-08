@@ -7,6 +7,7 @@ import type { HarnessRuntimeCandidate } from './harness-runtime.js'
 import { HarnessToolchainManager, prependToolchainToPath } from './harness-toolchain.js'
 import type { HarnessDesktopBridgeLaunch } from './harness-desktop-bridge.js'
 import { parsePluginInitializationFailure, PluginInitializationError } from './plugin-recovery.js'
+import { DesktopPluginLinkError, ensureDesktopPluginLinks } from './harness-plugin-links.js'
 
 const URL_PATTERN = /dsh web:\s+(http:\/\/127\.0\.0\.1:\d+(?:\/[^\s]*)?)/u
 const START_TIMEOUT_MS = 90_000
@@ -87,6 +88,7 @@ export class HarnessProcess extends EventEmitter {
   ) { super() }
 
   async start(candidate: HarnessRuntimeCandidate, options: HarnessLaunchOptions = {}): Promise<RunningHarness> {
+    await ensureDesktopPluginLinks(this.desktopBridge)
     await this.stop()
     const toolchain = await this.toolchainManager.prepare(candidate)
     this.stopping = false
@@ -135,11 +137,18 @@ export class HarnessProcess extends EventEmitter {
     try {
       const url = await this.waitForUrl(child)
       await this.waitForHealthy(url, child)
+      // A first-time Profile bootstrap may have installed dependencies and
+      // pruned our links. Restore them before exposing the ready conversation.
+      await ensureDesktopPluginLinks(this.desktopBridge)
       this.activeCandidate = candidate
       this.activeEnvironment = environment
       this.activePnpmEntry = toolchain.pnpmEntry
       return { candidate, url }
     } catch (error) {
+      if (error instanceof DesktopPluginLinkError) {
+        await this.stop()
+        throw error
+      }
       const failure = parsePluginInitializationFailure(startupOutput)
       if (failure !== undefined) throw new PluginInitializationError(failure)
       throw withHarnessStartupOutput(error, startupOutput)
@@ -153,7 +162,11 @@ export class HarnessProcess extends EventEmitter {
     const candidate = this.activeCandidate
     const environment = this.activeEnvironment
     if (candidate === undefined || environment === undefined) throw new Error('Harness 尚未启动，无法运行 Plugin 命令。')
-    return await this.runHarnessCommand(candidate, ['plugin', '--profile', profile, ...args], environment)
+    try {
+      return await this.runHarnessCommand(candidate, ['plugin', '--profile', profile, ...args], environment)
+    } finally {
+      await ensureDesktopPluginLinks(this.desktopBridge)
+    }
   }
 
   async runPnpm(profile: string, args: string[]): Promise<HarnessCommandResult> {
@@ -164,12 +177,16 @@ export class HarnessProcess extends EventEmitter {
     const harnessHome = configuredHome === undefined || configuredHome.length === 0
       ? join(this.workspacePath, '.dsh')
       : configuredHome
-    return await this.runElectronNodeCommand(
-      pnpmEntry,
-      ['--config.minimum-release-age=0', ...args],
-      join(harnessHome, 'profiles', profile),
-      environment,
-    )
+    try {
+      return await this.runElectronNodeCommand(
+        pnpmEntry,
+        ['--config.minimum-release-age=0', ...args],
+        join(harnessHome, 'profiles', profile),
+        environment,
+      )
+    } finally {
+      await ensureDesktopPluginLinks(this.desktopBridge)
+    }
   }
 
   async stop(): Promise<void> {
