@@ -6,15 +6,18 @@ import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { spawn } from 'node:child_process'
 import { pipeline } from 'node:stream/promises'
+import { fileURLToPath } from 'node:url'
 import semver from 'semver'
 import { x as extractTar } from 'tar'
 import type { HarnessReleaseVersion, HarnessUpdateStatus } from '../shared/contracts.js'
 import { readRuntimeState, writeRuntimeState, type HarnessRuntimeState } from './runtime-state.js'
 import { applyHarnessRuntimeCompatibility } from './runtime-compat.js'
 import { prependToolchainToPath } from './harness-toolchain.js'
+import { assertSessionFormatCompatible } from './session-format-compat.js'
 
 const require = createRequire(import.meta.url)
 const HARNESS_PACKAGE = '@deepseek-ai/dsh'
+const HARNESS_BOOTSTRAP = fileURLToPath(new URL('../harness-bootstrap.cjs', import.meta.url))
 export const DESKTOP_PNPM_VERSION = '11.19.0'
 export const DESKTOP_KOFFI_VERSION = '3.1.6'
 const PNPM_MINIMUM_RELEASE_AGE_CONFIG = '--config.minimum-release-age=0'
@@ -253,6 +256,16 @@ export class HarnessRuntimeManager extends EventEmitter {
     if (state.pendingVersion === candidate.version) delete state.pendingVersion
     if (state.activeVersion === candidate.version) delete state.activeVersion
     await this.persistState()
+    this.setUpdateView({
+      ...this.updateView,
+      status: 'error',
+      version: candidate.version,
+      message: `Harness ${candidate.version} 启动失败，未启用此版本。\n${reason}`,
+    })
+  }
+
+  async assertSessionCompatibility(candidate: HarnessRuntimeCandidate): Promise<void> {
+    await assertSessionFormatCompatible(this.harnessHome, candidate.entryPath, candidate.version)
   }
 
   scheduleAutomaticChecks(initialDelayMs = 15_000): void {
@@ -405,11 +418,13 @@ export class HarnessRuntimeManager extends EventEmitter {
     }
 
     if (version === this.mustBundled().version) {
+      await this.assertSessionCompatibility(this.mustBundled())
       publishProgress(90, '正在切换到桌面端内置版本…')
       delete state.activeVersion
       delete state.pendingVersion
     } else {
       await this.installVersion(version, publishProgress)
+      await this.assertSessionCompatibility(this.managedCandidate(version, true))
       state.pendingVersion = version
       delete state.badVersions[version]
     }
@@ -468,7 +483,8 @@ export class HarnessRuntimeManager extends EventEmitter {
   private async installVersion(version: string, onProgress: (progress: number, message: string) => void = () => undefined): Promise<void> {
     const finalPath = join(this.versionsRoot, version)
     if (await this.isCandidatePresent(this.managedCandidate(version, true))) {
-      onProgress(88, '该版本已下载，正在准备切换…')
+      onProgress(88, '该版本已下载，正在验证桌面启动入口…')
+      await this.verifyVersion(this.managedCandidate(version, true).entryPath, version)
       return
     }
 
@@ -523,8 +539,8 @@ export class HarnessRuntimeManager extends EventEmitter {
       const stagedPnpmEntry = join(stagingPath, 'node_modules', 'pnpm', 'bin', 'pnpm.cjs')
       await Promise.all([access(stagedEntry), access(stagedPnpmEntry)])
       await applyHarnessRuntimeCompatibility(stagedEntry)
-      onProgress(92, '正在验证 Harness 版本…')
-      await this.runNode(stagedEntry, ['--version'])
+      onProgress(92, '正在验证 Harness 桌面启动入口与版本…')
+      await this.verifyVersion(stagedEntry, version)
       await rm(finalPath, { recursive: true, force: true })
       await rename(stagingPath, finalPath)
       installed = true
@@ -537,10 +553,17 @@ export class HarnessRuntimeManager extends EventEmitter {
     }
   }
 
-  private runNode(entryPath: string, args: string[], onOutput: (chunk: string) => void = () => undefined): Promise<void> {
+  private async verifyVersion(entryPath: string, version: string): Promise<void> {
+    const stdout = await this.runNode(HARNESS_BOOTSTRAP, [entryPath, '--version'], undefined, ['--expose-internals'])
+    if (stdout.trim() !== version) {
+      throw new Error(`Harness 桌面启动验证失败：预期版本 ${version}，实际输出 ${stdout.trim() || '为空'}。`)
+    }
+  }
+
+  private runNode(entryPath: string, args: string[], onOutput: (chunk: string) => void = () => undefined, nodeArgs: string[] = []): Promise<string> {
     return new Promise((resolve, reject) => {
       const environment = prependToolchainToPath(process.env, this.toolchainBinPath)
-      const child = spawn(this.electronExecutable, [entryPath, ...args], {
+      const child = spawn(this.electronExecutable, [...nodeArgs, entryPath, ...args], {
         env: {
           ...environment,
           ELECTRON_RUN_AS_NODE: '1',
@@ -562,8 +585,8 @@ export class HarnessRuntimeManager extends EventEmitter {
       child.stdout?.on('data', (chunk: Buffer) => captureOutput('stdout', chunk))
       child.stderr?.on('data', (chunk: Buffer) => captureOutput('stderr', chunk))
       child.once('error', reject)
-      child.once('exit', (code, signal) => {
-        if (code === 0) resolve()
+      child.once('close', (code, signal) => {
+        if (code === 0) resolve(stdout)
         else {
           const detail = runtimeCommandErrorDetail(stdout, stderr)
           reject(new Error(`runtime command failed (${String(code ?? signal)}):\n${detail}`))

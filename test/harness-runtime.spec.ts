@@ -80,6 +80,21 @@ describe('bundled Harness archive progress', () => {
 })
 
 describe('managed Harness install progress', () => {
+  it('validates the actual desktop bootstrap and rejects empty or mismatched version output', async () => {
+    const manager = new HarnessRuntimeManager('/unused', process.execPath) as unknown as {
+      verifyVersion(entry: string, version: string): Promise<void>
+      runNode: (...args: unknown[]) => Promise<string>
+    }
+    const command = vi.spyOn(manager, 'runNode').mockResolvedValue('0.1.5-alpha.1\n')
+    await manager.verifyVersion('/runtime/lib/bin.js', '0.1.5-alpha.1')
+    expect(command).toHaveBeenCalledWith(expect.stringMatching(/harness-bootstrap\.cjs$/),
+      ['/runtime/lib/bin.js', '--version'], undefined, ['--expose-internals'])
+    for (const output of ['', '0.1.2-rc.1\n']) {
+      command.mockResolvedValue(output)
+      await expect(manager.verifyVersion('/runtime/lib/bin.js', '0.1.5-alpha.1')).rejects.toThrow('桌面启动验证失败')
+    }
+  })
+
   it('maps pnpm package installation into the download stage', () => {
     const output = [
       'Packages: +500',

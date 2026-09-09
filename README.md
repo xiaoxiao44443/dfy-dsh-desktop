@@ -11,7 +11,8 @@ DeepSeek Harness 的轻量 Electron 桌面壳。Harness 仍是完整、未修改
 - 桌面壳 renderer 使用 React 19 + TypeScript + Vite，开发模式支持 HMR；Harness 页面和进程生命周期仍由 Electron 主进程独立托管。
 - 桌面端不覆盖 `DSH_HOME`：Harness 遵循官方解析顺序（显式配置、`$DSH_HOME`、`~/.dsh`）。因此外部 dsh 与桌面端自然共享配置、会话、Profile、凭据和扩展；项目工作区仍由 Harness 自己管理。
 - 桌面壳自己的 Chromium 状态、运行时、更新缓存和开发设置统一位于 `~/.saltfish/dfy-dsh-desktop`，Windows、macOS 与 Linux 使用同一目录约定。首次启动会自动迁移旧版 `~/.saltfish/deepseek-harness-desktop`。
-- Harness 核心安装在版本化目录。新版本先由 pnpm 安装到 staging，完成构建脚本白名单校验和 `dsh --version` 验证后才标记待更新；下次启动先试运行新版本，健康检查失败会自动回退。
+- Harness 核心安装在版本化目录。新版本先由 pnpm 安装到 staging，经桌面启动器运行 `dsh --version` 并核对输出后才标记待更新；兼容旧版自动执行入口与 `0.1.5-alpha.1` 的显式 `runCli()` 入口。下次启动先试运行新版本，失败会显示原因；回退和手动切换前检查已落盘的会话日志格式，阻止旧运行时读取升级后的会话。
+- 对 `0.1.5-alpha.1` 的旧日志迁移，启动器仅为已审计的 `dfy-media` 图片块和 `dfy-session-image` 生成图片块补充结构校验及准入，保留原内容和资源引用。事件转换、原日志保留和新版日志发布仍由 DSH 执行；未知块及未知字段继续拒绝迁移。侧栏点击不存在的会话时会显示错误提示。
 - 桌面端为每个受管 Harness 运行时生成同源的 `dsh`、`pnpm` 和 `node` 启动器，并把它们注入 Harness 进程的 `PATH`。因此标题菜单里的开发操作、Harness 自己的终端和 Agent 启动的子进程使用的是同一套版本，不会出现“壳能用、dsh 自己不能用”的分叉。
 - 桌面端通过内置 Host + Client 插件 `dsh-desktop-bridge` 提供受审批的 `desktop_restart_harness` 工具、回复/权限/提问系统通知，并监测当前 Web Profile 是否在进程启动后发生变化。模型可以请求由 Electron 主进程安全重启 Harness，从而加载新安装的插件；桥接层使用桌面私有 `--patch` 和专用模块解析器注入。桌面端还会在当前 Web Profile 的 `node_modules` 中维护 `dsh-desktop-bridge`、`dsh-desktop-browser` 的目录链接，供官方插件清单检查读取包名和版本。启动与插件命令结束时会修复缺失、失效的链接；同名普通文件或目录会报错并保留。此过程不改写 Profile 的依赖声明或 bundle 配置。
 
@@ -53,7 +54,15 @@ Windows 卸载程序会询问是否一并删除 `~/.saltfish/dfy-dsh-desktop`。
 pnpm package:mac:intel
 ```
 
-Harness 运行时包含平台相关的原生依赖，因此 `prepare:runtime` 必须在目标平台和架构上执行，Windows 生成的 `harness-runtime.tgz` 不能用于 macOS。仓库提供 `.github/workflows/build-macos-intel.yml`，可以在 GitHub Actions 的 Intel macOS Runner 上手动构建 DMG 和 ZIP。当前产物未签名，适合测试；公开分发前还需要接入 Developer ID 签名和 Apple 公证。
+构建 macOS Apple Silicon 安装包（M 系列芯片，最低 macOS 12）：
+
+```bash
+pnpm package:mac:arm64
+```
+
+Harness 运行时包含平台相关的原生依赖，因此 `prepare:runtime` 必须在目标平台和架构上执行。仓库提供 `.github/workflows/build-macos-intel.yml` 和 `.github/workflows/build-macos-arm64.yml`，分别使用 Intel 和 ARM64 macOS Runner 准备运行时、构建 DMG/ZIP，并检查打包后的 Electron、原生依赖和 Harness 启动入口。推送 `v*` 标签会构建 Windows x64、macOS Intel、macOS Apple Silicon 三个平台，统一发布安装包与 SHA-256 校验文件。客户端更新会选择对应架构的安装包。
+
+当前 macOS 产物使用本地 ad-hoc 签名，未接入 Developer ID 签名和 Apple 公证，适合测试。
 
 macOS 使用原生红黄绿窗口按钮，并直接从 App Resources 启动随包运行时，不需要在首次启动时解压。桌面壳自己的状态仍位于 `~/.saltfish/dfy-dsh-desktop`，Harness 官方数据仍位于 `~/.dsh`。
 

@@ -16,8 +16,8 @@ async function updateRoot(): Promise<string> {
   return root
 }
 
-function releasePayload(version: string, installer: Buffer, prerelease = true): unknown[] {
-  const installerName = `DFY-DSH-Desktop-${version}-macos-x64.dmg`
+function releasePayload(version: string, installer: Buffer, prerelease = true, arch = 'x64'): unknown[] {
+  const installerName = `DFY-DSH-Desktop-${version}-macos-${arch}.dmg`
   return [{
     tag_name: `v${version}`,
     html_url: `https://github.com/xiaoxiao44443/dfy-dsh-desktop/releases/tag/v${version}`,
@@ -65,28 +65,34 @@ describe('DesktopUpdateService', () => {
     })
   })
 
-  it('downloads into the desktop data directory, verifies SHA-256, and cleans it after upgrade', async () => {
+  it.each(['x64', 'arm64'])('downloads the %s installer, verifies SHA-256, and cleans it after upgrade', async (arch) => {
     const root = await updateRoot()
     const version = '0.1.2-alpha.3'
-    const installerName = `DFY-DSH-Desktop-${version}-macos-x64.dmg`
+    const installerName = `DFY-DSH-Desktop-${version}-macos-${arch}.dmg`
     const installer = Buffer.from('verified desktop installer')
     const checksum = createHash('sha256').update(installer).digest('hex')
     const fetcher = vi.fn(async (input: string | URL | Request) => {
       const url = String(input)
       if (url.includes('api.github.com')) {
-        return new Response(JSON.stringify(releasePayload(version, installer)), {
+        const releases = releasePayload(version, installer, true, arch) as Array<{ assets: unknown[] }>
+        releases[0].assets.unshift({
+          name: `DFY-DSH-Desktop-${version}-macos-${arch === 'arm64' ? 'x64' : 'arm64'}.dmg`,
+          browser_download_url: 'https://downloads.example/wrong-architecture.dmg',
+          size: installer.byteLength,
+        })
+        return new Response(JSON.stringify(releases), {
           headers: { 'content-type': 'application/json' },
         })
       }
       if (url.endsWith('SHA256SUMS.txt')) return new Response(`${checksum}  ${installerName}\n`)
-      if (url.endsWith('.dmg')) return new Response(installer)
+      if (url.endsWith(installerName)) return new Response(installer)
       return new Response('not found', { status: 404 })
     })
     const service = new DesktopUpdateService({
       updatesRoot: root,
       currentVersion: '0.1.2-alpha.2',
       platform: 'darwin',
-      arch: 'x64',
+      arch,
       fetcher: fetcher as typeof fetch,
     })
     await service.initialize()
@@ -101,7 +107,7 @@ describe('DesktopUpdateService', () => {
       updatesRoot: root,
       currentVersion: version,
       platform: 'darwin',
-      arch: 'x64',
+      arch,
       fetcher: fetcher as typeof fetch,
     })
     await upgraded.initialize()

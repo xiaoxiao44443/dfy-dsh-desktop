@@ -65,4 +65,5 @@ export declare function latestAssistantReply(binding: unknown): string | undefin
 export declare function latestAssistantMarker(binding: unknown): unknown
 export declare function waitForAssistantReply(binding: unknown, baseline: unknown, timeoutMs?: number): Promise<string | undefined>
 export declare function pendingInteractionSummary(binding: unknown, status: 'approval' | 'question' | 'plan-review'): string | undefined
+export declare function installSessionOpenFeedback(sessions: { open(id: string): void }, report: (message: string) => void): () => void
 export declare function apply(ctx: Context): void

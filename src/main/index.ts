@@ -17,6 +17,7 @@ import { DshCliIntegration } from './dsh-cli-integration.js'
 import { PluginManagementService } from './plugin-management.js'
 import { DesktopRendererHost } from './desktop-renderer-host.js'
 import { DesktopUpdateService } from './desktop-update.js'
+import { SessionFormatCompatibilityError } from './session-format-compat.js'
 
 // Chromium may not propagate macOS' dark color-scheme media query into the
 // cross-origin Harness iframe. Preserve explicit Harness light/dark choices,
@@ -145,6 +146,7 @@ if (!app.requestSingleInstanceLock()) {
       for (const candidate of await runtime.launchCandidates()) {
         windows.setHarnessStarting(candidate.version)
         try {
+          await runtime.assertSessionCompatibility(candidate)
           const running = await harness.start(candidate, settings)
           await runtime.markHealthy(candidate)
           development?.setHarnessVersion(candidate.version)
@@ -157,6 +159,7 @@ if (!app.requestSingleInstanceLock()) {
           const message = error instanceof Error ? error.message : String(error)
           failures.push(`${candidate.version} (${candidate.source}): ${message}`)
           if (error instanceof DesktopPluginLinkError) break
+          if (error instanceof SessionFormatCompatibilityError) break
           if (error instanceof PluginInitializationError) {
             pluginFailure = error
             break

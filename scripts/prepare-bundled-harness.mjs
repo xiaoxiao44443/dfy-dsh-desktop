@@ -67,6 +67,7 @@ const runtimeReady = (
 
 if (!runtimeReady) {
   const canReuseHarness = installedVersion === version && installedPolicyVersion === policyVersion
+    && installedPlatform === runtimePlatform && installedArch === runtimeArch
   if (!canReuseHarness) await rm(runtimeRoot, { recursive: true, force: true })
   await Promise.all([
     mkdir(runtimeRoot, { recursive: true }),

@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop-bridge",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "DFY DSH Desktop host integration bridge",
   "type": "module",
   "main": "./lib/index.js",

@@ -68,7 +68,7 @@ function safeAssetName(name: string): boolean {
 }
 
 function installerAssetName(platform: NodeJS.Platform, arch: string, version: string): string | undefined {
-  if (platform === 'darwin' && arch === 'x64') return `DFY-DSH-Desktop-${version}-macos-x64.dmg`
+  if (platform === 'darwin' && (arch === 'x64' || arch === 'arm64')) return `DFY-DSH-Desktop-${version}-macos-${arch}.dmg`
   if (platform === 'win32' && arch === 'x64') return `DFY-DSH-Desktop-${version}-x64.exe`
   return undefined
 }

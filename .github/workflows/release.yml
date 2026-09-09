@@ -15,11 +15,15 @@ jobs:
   build-macos-intel:
     uses: ./.github/workflows/build-macos-intel.yml
 
+  build-macos-arm64:
+    uses: ./.github/workflows/build-macos-arm64.yml
+
   publish-release:
     name: Publish GitHub release
     needs:
       - build-windows-x64
       - build-macos-intel
+      - build-macos-arm64
     runs-on: ubuntu-latest
 
     steps:

@@ -3,6 +3,7 @@ import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import { createRequire, registerHooks, syncBuiltinESMExports } from 'node:module'
 import { isAbsolute, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { registerDfySessionFormatCompatibility } from './harness-session-format-compat.cjs'
 
 const electronExecutable = process.execPath.toLowerCase()
 const originalSpawn = childProcess.spawn
@@ -150,10 +151,14 @@ async function bootstrap(): Promise<void> {
   const harnessArgs = process.argv.slice(3)
   ensureHiddenHarnessConsole(harnessEntry)
   registerDesktopBridgeResolver()
+  registerDfySessionFormatCompatibility()
   delete process.env.ELECTRON_RUN_AS_NODE
   delete process.env.ELECTRON_NO_ATTACH_CONSOLE
   process.argv = [process.execPath, harnessEntry, ...harnessArgs]
-  await import(pathToFileURL(harnessEntry).href)
+  const cli = await import(pathToFileURL(harnessEntry).href)
+  // Newer DSH entries only auto-run when import.meta.main is true. Older
+  // entries run during import and do not export runCli, so never run them twice.
+  if (typeof cli.runCli === 'function') await cli.runCli()
 }
 
 void bootstrap()

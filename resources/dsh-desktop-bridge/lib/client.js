@@ -607,6 +607,23 @@ window.__ModuleLoader__.load({
 			error: { margin: "12px 0 0", color: "#ef6b73", fontSize: 12 }
 		};
 
+		function installSessionOpenFeedback(sessions, report) {
+			const original = sessions.open;
+			const wrapped = function (...args) {
+				try {
+					return original.apply(this, args);
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					report(message.startsWith("sessions.select: unknown session ")
+						? "无法打开这条会话：当前没有对应的会话记录。请刷新后重试；如果历史文件已被删除，列表中的残留条目无法恢复对话。"
+						: `无法打开会话：${message}`);
+				}
+			};
+			sessions.open = wrapped;
+			return () => { if (sessions.open === wrapped) sessions.open = original; };
+		}
+
+		exports.installSessionOpenFeedback = installSessionOpenFeedback;
 		exports.name = "desktop-notifications";
 		exports.inject = ["slots", "sessions", "cordisInspect"];
 		exports.projectSessions = projectSessions;
@@ -618,6 +635,7 @@ window.__ModuleLoader__.load({
 		exports.DesktopContextMenuService = DesktopContextMenuService;
 		exports.createDesktopContextMenuInspectProvider = createDesktopContextMenuInspectProvider;
 		exports.apply = function apply(ctx) {
+			ctx.effect(() => installSessionOpenFeedback(ctx.sessions, (message) => window.alert(message)), "desktop: session open errors");
 			const desktopContextMenu = new DesktopContextMenuService(ctx);
 			ctx.effect(() => installContextMenuTransport(desktopContextMenu), "desktop-context-menu: Electron transport");
 			ctx.effect(

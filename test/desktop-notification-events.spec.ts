@@ -43,6 +43,28 @@ async function loadClientModule(overrides: Record<string, unknown> = {}): Promis
 }
 
 describe('desktop notification session transitions', () => {
+  it('reports missing session selection and preserves successful navigation and cleanup', async () => {
+    const client = await loadClientModule()
+    const install = client.installSessionOpenFeedback as (sessions: { open(id: string): void }, report: (message: string) => void) => () => void
+    const report = vi.fn()
+    const sessions = {
+      current: '',
+      open(id: string) {
+        if (id === 'missing') throw new Error('sessions.select: unknown session missing')
+        this.current = id
+      },
+    }
+    const original = sessions.open
+    const dispose = install(sessions, report)
+    expect(() => sessions.open('missing')).not.toThrow()
+    expect(report).toHaveBeenCalledWith(expect.stringContaining('当前没有对应的会话记录'))
+    sessions.open('existing')
+    expect(sessions.current).toBe('existing')
+    expect(report).toHaveBeenCalledTimes(1)
+    dispose()
+    expect(sessions.open).toBe(original)
+  })
+
   it('provides the context-menu registry as a lifecycle-owned Cordis Service', async () => {
     const client = await loadClientModule()
     const DesktopContextMenuService = client.DesktopContextMenuService as new (ctx: Record<string, unknown>) => {

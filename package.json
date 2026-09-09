@@ -1,7 +1,7 @@
 {
   "name": "dfy-dsh-desktop",
   "productName": "DFY DSH Desktop",
-  "version": "0.1.2-rc.1-1.1",
+  "version": "0.1.5-alpha.1",
   "description": "A fast desktop shell for DeepSeek Harness with managed Harness runtime updates.",
   "type": "module",
   "main": "dist/main/index.js",
@@ -24,7 +24,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
     "package:win": "pnpm run build && pnpm run prepare:runtime && electron-builder --win nsis --publish never",
     "package:mac:local": "pnpm run build && pnpm run prepare:runtime && pnpm run prepare:mac-icon && electron-builder --mac --x64 --dir --publish never",
-    "package:mac:intel": "pnpm run build && pnpm run prepare:runtime && pnpm run prepare:mac-icon && electron-builder --mac dmg zip --x64 --publish never"
+    "package:mac:intel": "pnpm run build && pnpm run prepare:runtime && pnpm run prepare:mac-icon && electron-builder --mac dmg zip --x64 --publish never",
+    "package:mac:arm64": "pnpm run build && pnpm run prepare:runtime && pnpm run prepare:mac-icon && electron-builder --mac dmg zip --arm64 --publish never"
   },
   "dependencies": {
     "lucide-react": "1.30.0",
@@ -34,7 +35,7 @@
     "tar": "7.5.22"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh": "0.1.2-rc.1",
+    "@deepseek-ai/dsh": "0.1.5-alpha.1",
     "@types/node": "24.10.1",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
