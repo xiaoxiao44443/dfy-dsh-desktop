@@ -96,6 +96,12 @@ Patch 是 Harness Web 服务的启动参数，因此要通过桌面菜单应用�
 
 桌面端的基础右键菜单由 Electron 直接从 Harness iframe 的 `context-menu` 事件生成，即使 `dsh-desktop-bridge` Client 插件未加载，撤销、剪切、复制、粘贴、全选和链接操作仍然可用。React 壳层只负责绘制菜单，Harness 页面不会获得 Electron IPC。
 
+普通 HTML/HTM/XHTML 文件通过 appearance 插件提供“在内置浏览器中打开”和“在默认浏览器中打开”，使用原文件的 `file:` 地址并保留相对图片、样式和脚本的目录关系。文件单击仍由 DSH 打开侧栏预览，可视化产物继续使用自身的发布地址。
+
+内置浏览器的地址栏显示可读的中文等字符，平时隐藏本地文件与 HTTP/HTTPS 协议；首次点击全选，再次点击显示协议并放置光标。全选复制始终包含协议和 URL 编码，部分选择时复制显示的文字。右键菜单会在异步追加条目或尺寸变化时重新定位，避免超出窗口边缘。
+
+图片菜单提供“复制”和“下载副本”。下载通过系统保存对话框选择位置，默认文件名为 `DFY DSH 图像 2026年9月9日 19_23_54.png` 这样的本地时间格式，扩展名随原始图片编码变化。能定位到已有原图时，Windows 额外显示“在资源管理器中打开”，macOS 显示“在访达中显示”；纯内存图片不会为此自动生成文件。
+
 `dsh-desktop-bridge` Client 插件通过官方 Cordis 机制提供 `desktopContextMenu` Service。其他 Client 插件用 `inject` 声明依赖并追加菜单项；注册属于调用插件自己的 Fiber，插件卸载或热替换时会由 Cordis 自动撤销。Electron IPC 只是 Service Provider 内部的传输实现，不是插件 API。桌面壳只接收经过限长、命名空间和图标白名单处理的菜单描述，回调始终留在 Harness iframe 内执行。
 
 ```js

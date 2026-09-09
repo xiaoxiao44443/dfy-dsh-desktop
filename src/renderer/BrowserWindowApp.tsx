@@ -9,7 +9,7 @@ import {
   RotateCw,
   X,
 } from 'lucide-react'
-import { useEffect, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from 'react'
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import type {
   BrowserDisplayMode,
   DesktopBrowserTabState,
@@ -17,6 +17,7 @@ import type {
   FloatingBrowserWindowState,
 } from '../shared/contracts.js'
 import { AgentPointerIcon } from './AgentPointerIcon.js'
+import { BrowserAddressInput } from './BrowserAddressInput.js'
 
 const EMPTY_STATE: FloatingBrowserWindowState = {
   loading: false,
@@ -179,8 +180,6 @@ function DeviceToolbar({ viewport, zoomFactor }: { viewport: DesktopBrowserViewp
 
 export function BrowserWindowApp(): React.JSX.Element {
   const [state, setState] = useState<FloatingBrowserWindowState>(EMPTY_STATE)
-  const [address, setAddress] = useState('')
-  const addressRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     const dispose = window.floatingBrowser.onState(setState)
@@ -188,14 +187,8 @@ export function BrowserWindowApp(): React.JSX.Element {
     return dispose
   }, [])
   useEffect(() => {
-    if (document.activeElement !== addressRef.current) setAddress(state.url)
     document.title = state.title && state.url ? `${state.title} - DFY DSH Desktop 浏览器` : 'DFY DSH Desktop 浏览器'
   }, [state.title, state.url])
-
-  const submitAddress = (event: FormEvent<HTMLFormElement>): void => {
-    event.preventDefault()
-    void invoke('navigate', address)
-  }
   const openMenu = (kind: 'display' | 'settings', button: HTMLButtonElement): void => {
     const rect = button.getBoundingClientRect()
     button.blur()
@@ -224,10 +217,7 @@ export function BrowserWindowApp(): React.JSX.Element {
           <button type="button" aria-label="后退" disabled={!state.canGoBack} onClick={() => void invoke('back')}><ArrowLeft aria-hidden="true" /></button>
           <button type="button" aria-label="前进" disabled={!state.canGoForward} onClick={() => void invoke('forward')}><ArrowRight aria-hidden="true" /></button>
           <button type="button" className={state.loading ? 'loading' : ''} aria-label={state.loading ? '停止加载' : '重新加载'} onClick={() => void invoke('reload')}><RotateCw aria-hidden="true" /></button>
-          <form className="address" onSubmit={submitAddress}>
-            <Globe2 aria-hidden="true" />
-            <input ref={addressRef} aria-label="网页地址" placeholder="输入网址或搜索内容" spellCheck={false} value={address} onChange={(event) => setAddress(event.target.value)} />
-          </form>
+          <BrowserAddressInput className="address" url={state.url} onNavigate={(address) => invoke('navigate', address)} />
           <button type="button" aria-label="浏览器设置" onClick={(event) => openMenu('settings', event.currentTarget)}><MoreVertical aria-hidden="true" /></button>
         </div>
         {state.viewport === null ? null : <DeviceToolbar viewport={state.viewport} zoomFactor={state.zoomFactor} />}

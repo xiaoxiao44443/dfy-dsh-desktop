@@ -84,7 +84,7 @@ describe('desktop browser settings', () => {
       'https://www.bing.com/search?q=browser%20automation',
     )
     expect(() => normalizeBrowserAddress('browser automation', false)).toThrow('完整')
-    expect(() => normalizeBrowserAddress('file:///tmp/example.html', false)).toThrow('完整')
+    expect(normalizeBrowserAddress('file:///tmp/example.html', false)).toBe('file:///tmp/example.html')
   })
 
   it('reveals an existing background tab instead of creating a blank tab', () => {

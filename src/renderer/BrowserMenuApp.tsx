@@ -4,6 +4,7 @@ import {
   Check,
   ClipboardPaste,
   Copy,
+  Download,
   ExternalLink,
   Folder,
   History,
@@ -49,6 +50,7 @@ const contextIcons: Record<ContextMenuIcon, LucideIcon> = {
   terminal: Terminal,
   sparkles: Sparkles,
   refresh: RefreshCw,
+  download: Download,
 }
 
 function invoke<T = void>(action: string, value?: unknown): Promise<T> {

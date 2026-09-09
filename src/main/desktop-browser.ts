@@ -19,6 +19,8 @@ import type {
   DesktopBrowserNavigationAction,
 } from '../shared/contracts.js'
 import type { DesktopContextMenuRequest } from '../shared/context-menu.js'
+import { isSupportedBrowserUrl, normalizeBrowserPageUrl, normalizeLocalHtmlUrl } from '../shared/browser-address.js'
+import { installImageContextCapture } from './image-context.js'
 import type {
   BrowserAsyncEventKind,
   BrowserAsyncEventWaiter,
@@ -140,6 +142,19 @@ function mouseButton(value: unknown): { cdp: 'left' | 'middle' | 'right' | 'back
   if (normalized === 4) return { cdp: 'back', dom: 3 }
   if (normalized === 5) return { cdp: 'forward', dom: 4 }
   throw new Error('button 必须是 left/right/middle 或 1–5。')
+}
+
+function localBrowserFrame(frame: WebFrameMain | null | undefined): boolean {
+  try {
+    for (let current = frame; current !== null && current !== undefined; current = current.parent) {
+      // A fresh or about:blank child frame inherits its parent's origin.
+      if (current.url === '' || current.url === 'about:blank' || current.url === 'about:srcdoc') continue
+      return normalizeLocalHtmlUrl(current.url) !== undefined
+    }
+  } catch {
+    // The frame may already have been destroyed by the navigation.
+  }
+  return false
 }
 
 export class DesktopBrowserService extends EventEmitter {
@@ -1757,10 +1772,19 @@ export class DesktopBrowserService extends EventEmitter {
     view.setVisible(false)
     window.contentView.addChildView(view)
     const contents = view.webContents
+    installImageContextCapture(contents)
     contents.setZoomFactor(this.zoomFactor)
     contents.backgroundThrottling = false
-    contents.setWindowOpenHandler(({ url }) => {
-      if (/^https?:\/\//iu.test(url)) void this.openChildTab(tab, url)
+    contents.setWindowOpenHandler(({ url, referrer }) => {
+      const target = normalizeBrowserPageUrl(url)
+      const isLocal = target !== undefined && normalizeLocalHtmlUrl(target) !== undefined
+      // Electron exposes a referrer rather than an initiating frame here. When
+      // it is suppressed, only a wholly local frame tree can open a local tab.
+      const localSource = !isLocal || (normalizeLocalHtmlUrl(contents.getURL()) !== undefined
+        && (referrer.url.length > 0
+          ? normalizeLocalHtmlUrl(referrer.url) !== undefined
+          : contents.mainFrame.framesInSubtree.every((frame) => localBrowserFrame(frame))))
+      if (target !== undefined && localSource) void this.openChildTab(tab, target)
       return { action: 'deny' }
     })
     contents.on('before-mouse-event', (_event, input) => {
@@ -1774,8 +1798,24 @@ export class DesktopBrowserService extends EventEmitter {
       event.preventDefault()
       this.emit('context-menu', params, contents, 'page')
     })
-    contents.on('will-navigate', (event, target) => {
-      if (target === 'about:blank' || /^https?:\/\//iu.test(target)) return
+    const guardPageNavigation = (event: Electron.Event<Electron.WebContentsWillNavigateEventParams>): void => {
+      if (event.url === 'about:blank') return
+      const target = normalizeBrowserPageUrl(event.url)
+      if (target !== undefined && (normalizeLocalHtmlUrl(target) === undefined
+        || (normalizeLocalHtmlUrl(contents.getURL()) !== undefined
+          && localBrowserFrame(event.initiator ?? event.frame)))) return
+      event.preventDefault()
+    }
+    contents.on('will-navigate', guardPageNavigation)
+    contents.on('will-frame-navigate', (event) => {
+      // Embedded srcdoc, data and blob documents already work in web pages.
+      // Extend the local-file boundary to subframes without restricting them.
+      if (/^file:/iu.test(event.url)) guardPageNavigation(event)
+    })
+    contents.on('will-redirect', (event) => {
+      // Local files cannot issue HTTP redirects. Never let a remote redirect
+      // reach the filesystem, even when the navigation began on a local page.
+      if (normalizeBrowserPageUrl(event.url) !== undefined && normalizeLocalHtmlUrl(event.url) === undefined) return
       event.preventDefault()
     })
     contents.on('did-start-loading', () => {
@@ -1914,7 +1954,7 @@ export class DesktopBrowserService extends EventEmitter {
     const contents = tab.view.webContents
     if (contents === undefined || contents.isDestroyed()) return
     const current = contents.getURL()
-    tab.url = /^https?:\/\//iu.test(current) ? current : ''
+    tab.url = normalizeBrowserPageUrl(current) ?? ''
     tab.title = contents.getTitle().trim() || (tab.url || (tab.sessionId === undefined ? '新标签页' : 'Agent 浏览器'))
   }
 
@@ -1928,7 +1968,7 @@ export class DesktopBrowserService extends EventEmitter {
 
   private async recordHistory(tab: BrowserTabRuntime): Promise<void> {
     this.capturePageState(tab)
-    if (!/^https?:\/\//iu.test(tab.url)) return
+    if (!isSupportedBrowserUrl(tab.url)) return
     const now = new Date().toISOString()
     const entry: DesktopBrowserHistoryEntry = {
       id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,

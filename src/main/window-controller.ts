@@ -1,7 +1,7 @@
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { readFile } from 'node:fs/promises'
-import { app, BrowserWindow, clipboard, ipcMain, nativeImage, nativeTheme, shell } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, nativeTheme, shell } from 'electron'
 import type { ContextMenuParams, WebContents, WebFrameMain } from 'electron'
 import type { BrowserDisplayMode, BrowserMenuKind, ColorTheme, DesktopApplicationMenuAction, DesktopBrowserMenuAnchor, DesktopBrowserNavigationAction, DesktopBrowserViewBounds, DesktopBrowserViewport, DesktopPlatform, DesktopState, DevelopmentPluginRequest, HarnessLifecycle, PluginActivationRequest, PluginInitializationFailure, PluginInstallRequest, PluginRemoveRequest, PluginUpdateRequest, TitleMenuAction, WindowAction } from '../shared/contracts.js'
 import type { DesktopContextMenuActionRequest, DesktopContextMenuRequest, DesktopPointerInput, PluginContextMenuCollection } from '../shared/context-menu.js'
@@ -12,6 +12,10 @@ import type { PluginManagementService } from './plugin-management.js'
 import { parsePluginInitializationFailure, type PluginRecoveryService } from './plugin-recovery.js'
 import { appendPluginContextMenuItems, BUILTIN_CONTEXT_MENU_ACTIONS, buildBuiltinContextMenuItems } from './context-menu.js'
 import { DEFAULT_BROWSER_SETTINGS, type DesktopBrowserService } from './desktop-browser.js'
+import { isSupportedBrowserUrl } from '../shared/browser-address.js'
+import { openInDefaultBrowser } from './default-browser.js'
+import { findContextMenuImagePath, revealContextMenuImage, saveContextMenuImage } from './image-actions.js'
+import { installImageContextCapture } from './image-context.js'
 import type { DesktopApplicationMenuState } from '../shared/contracts.js'
 import type { DesktopUpdateService } from './desktop-update.js'
 
@@ -65,7 +69,10 @@ interface PendingDesktopContextMenu {
   linkURL: string
   srcURL: string
   selectionText: string
+  isEditable: boolean
   allowedItemIds: Set<string>
+  items: DesktopContextMenuRequest['items']
+  imageRevealPath?: string
   pluginToken?: string
 }
 
@@ -164,6 +171,7 @@ export class WindowController {
       },
     })
     this.window = window
+    installImageContextCapture(window.webContents)
 
     window.on('maximize', () => this.publishState())
     window.on('unmaximize', () => this.publishState())
@@ -609,12 +617,15 @@ export class WindowController {
         linkURL: params.linkURL,
         srcURL: params.srcURL,
         selectionText: params.selectionText,
+        isEditable: params.isEditable,
+        items: builtins,
         allowedItemIds: new Set(builtins.flatMap((entry) => entry.kind === 'item' && entry.enabled ? [entry.id] : [])),
       }
       const request: DesktopContextMenuRequest = { requestId, x: params.x, y: params.y, items: builtins }
       window.webContents.send(CONTEXT_MENU_CHANNEL, request)
+      void this.updateImageRevealMenu(this.pendingContextMenu, params)
       void pluginCollectionPromise.then((pluginCollection) => {
-        this.updateOpenContextMenuWithPlugins(sequence, requestId, frame, params, builtins, pluginCollection)
+        this.updateOpenContextMenuWithPlugins(sequence, requestId, frame, params, pluginCollection)
       })
       return
     }
@@ -646,6 +657,8 @@ export class WindowController {
       linkURL: effectiveLinkURL,
       srcURL: params.srcURL,
       selectionText: params.selectionText,
+      isEditable: params.isEditable,
+      items,
       allowedItemIds: new Set(items.flatMap((entry) => entry.kind === 'item' && entry.enabled ? [entry.id] : [])),
       ...(pluginCollection === undefined ? {} : { pluginToken: pluginCollection.token }),
     }
@@ -656,6 +669,7 @@ export class WindowController {
       items,
     }
     window.webContents.send(CONTEXT_MENU_CHANNEL, request)
+    void this.updateImageRevealMenu(this.pendingContextMenu, params)
   }
 
   private updateOpenContextMenuWithPlugins(
@@ -663,7 +677,6 @@ export class WindowController {
     requestId: string,
     frame: WebFrameMain,
     params: ContextMenuParams,
-    builtins: DesktopContextMenuRequest['items'],
     pluginCollection: PluginContextMenuCollection | undefined,
   ): void {
     if (pluginCollection === undefined) return
@@ -678,13 +691,13 @@ export class WindowController {
       return
     }
     const effectiveLinkURL = params.linkURL || pluginCollection.linkURL || ''
-    const effectiveBuiltins = effectiveLinkURL === params.linkURL
-      ? builtins
-      : buildBuiltinContextMenuItems({ ...params, linkURL: effectiveLinkURL }, {
-        embeddedBrowserEnabled: this.browser?.state.settings.enabled === true,
-      })
+    const effectiveBuiltins = buildBuiltinContextMenuItems({ ...params, linkURL: effectiveLinkURL }, {
+      embeddedBrowserEnabled: this.browser?.state.settings.enabled === true,
+      imageCanReveal: pending.imageRevealPath !== undefined,
+    })
     const items = appendPluginContextMenuItems(effectiveBuiltins, pluginCollection.items)
     pending.linkURL = effectiveLinkURL
+    pending.items = items
     pending.allowedItemIds = new Set(items.flatMap((entry) => entry.kind === 'item' && entry.enabled ? [entry.id] : []))
     pending.pluginToken = pluginCollection.token
     this.window?.webContents.send(CONTEXT_MENU_CHANNEL, {
@@ -723,10 +736,42 @@ export class WindowController {
       linkURL: params.linkURL,
       srcURL: params.srcURL,
       selectionText: params.selectionText,
+      isEditable: params.isEditable,
+      items,
       allowedItemIds: new Set(items.flatMap((entry) => entry.kind === 'item' && entry.enabled ? [entry.id] : [])),
     }
     const request: DesktopContextMenuRequest = { requestId, x: params.x, y: params.y, items }
-    if (await this.browser?.openContextMenu(request, source) !== true) this.pendingContextMenu = undefined
+    const pending = this.pendingContextMenu
+    if (await this.browser?.openContextMenu(request, source) !== true) {
+      if (this.pendingContextMenu === pending) this.pendingContextMenu = undefined
+    } else if (this.pendingContextMenu === pending) {
+      void this.updateImageRevealMenu(pending, params, source)
+    }
+  }
+
+  private async updateImageRevealMenu(
+    pending: PendingDesktopContextMenu,
+    params: ContextMenuParams,
+    source?: 'floating' | 'page',
+  ): Promise<void> {
+    if (!pending.allowedItemIds.has('desktop.copy-image')) return
+    // Looking for an existing original must not download arbitrary web images on right-click.
+    if (!/^file:/iu.test(pending.srcURL)) {
+      if (!this.isHarnessFrame(pending.frame)) return
+      if (/^https?:/iu.test(pending.srcURL) && this.safeOrigin(pending.srcURL) !== this.harnessOrigin) return
+    }
+    const path = await findContextMenuImagePath(pending, this.runtime.harnessHome).catch(() => undefined)
+    if (path === undefined || this.pendingContextMenu !== pending || pending.frame.isDestroyed()) return
+    pending.imageRevealPath = path
+    const reveal = buildBuiltinContextMenuItems(params, { imageCanReveal: true })
+      .find((entry) => entry.kind === 'item' && entry.id === 'desktop.reveal-image')
+    if (reveal === undefined) return
+    const copyIndex = pending.items.findIndex((entry) => entry.kind === 'item' && entry.id === 'desktop.copy-image')
+    pending.items = [...pending.items.slice(0, copyIndex + 1), reveal, ...pending.items.slice(copyIndex + 1)]
+    pending.allowedItemIds.add('desktop.reveal-image')
+    const request: DesktopContextMenuRequest = { requestId: pending.requestId, x: pending.x, y: pending.y, items: pending.items }
+    if (source === undefined) this.window?.webContents.send(CONTEXT_MENU_CHANNEL, request)
+    else this.browser?.updateContextMenu(request)
   }
 
   private async collectPluginContextMenu(frame: WebFrameMain): Promise<PluginContextMenuCollection | undefined> {
@@ -747,8 +792,14 @@ export class WindowController {
 
     const builtin = BUILTIN_CONTEXT_MENU_ACTIONS[request.itemId]
     if (builtin !== undefined) {
-      await this.executeBuiltinContextMenuAction(pending, builtin)
-      await this.releasePluginContextMenu(pending, false)
+      try {
+        await this.executeBuiltinContextMenuAction(pending, builtin)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        await dialog.showMessageBox(this.mustWindow(), { type: 'error', title: '操作失败', message })
+      } finally {
+        await this.releasePluginContextMenu(pending, false)
+      }
       return
     }
     if (request.itemId.startsWith('plugin.') && pending.pluginToken !== undefined) {
@@ -770,24 +821,32 @@ export class WindowController {
     action: (typeof BUILTIN_CONTEXT_MENU_ACTIONS)[string],
   ): Promise<void> {
     if (action === 'open-link-in-browser') {
-      if (/^https?:\/\//iu.test(pending.linkURL) && this.browser?.state.settings.enabled === true) {
+      if (isSupportedBrowserUrl(pending.linkURL) && this.browser?.state.settings.enabled === true) {
         await this.browser.setPanelOpen(true)
         await this.browser.navigate(pending.linkURL, false)
       }
       return
     }
     if (action === 'open-link') {
-      if (/^https?:\/\//iu.test(pending.linkURL)) await shell.openExternal(pending.linkURL)
+      if (isSupportedBrowserUrl(pending.linkURL)) await openInDefaultBrowser(pending.linkURL)
       return
     }
     if (action === 'copy-link') {
-      if (/^https?:\/\//iu.test(pending.linkURL)) clipboard.writeText(pending.linkURL)
+      if (isSupportedBrowserUrl(pending.linkURL)) clipboard.writeText(pending.linkURL)
       return
     }
     if (action === 'copy-image') {
       if (await this.copyContextMenuImage(pending)) return
       await new Promise((resolve) => setTimeout(resolve, 16))
       if (!pending.contents.isDestroyed()) pending.contents.copyImageAt(pending.x, pending.y)
+      return
+    }
+    if (action === 'save-image') {
+      await saveContextMenuImage(pending, this.mustWindow())
+      return
+    }
+    if (action === 'reveal-image') {
+      if (pending.imageRevealPath !== undefined) await revealContextMenuImage(pending.imageRevealPath)
       return
     }
     if (pending.frame.isDestroyed()) return
@@ -813,7 +872,10 @@ export class WindowController {
     else if (action === 'redo') contents.redo()
     else if (action === 'cut') contents.cut()
     else if (action === 'copy') {
-      if (pending.selectionText.length > 0) clipboard.writeText(pending.selectionText)
+      // Editable fields can transform copied text (e.g. the readable URL bar).
+      // Preserve their native copy event instead of writing the display snapshot.
+      if (pending.isEditable) contents.copy()
+      else if (pending.selectionText.length > 0) clipboard.writeText(pending.selectionText)
       else contents.copy()
     } else if (action === 'paste') contents.paste()
     else if (action === 'select-all') contents.selectAll()

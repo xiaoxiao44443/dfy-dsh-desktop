@@ -1,5 +1,6 @@
 import type { ContextMenuParams } from 'electron'
 import type { ContextMenuActionEntry, ContextMenuEntry } from '../shared/context-menu.js'
+import { isSupportedBrowserUrl } from '../shared/browser-address.js'
 
 export type BuiltinContextMenuAction =
   | 'undo'
@@ -7,6 +8,8 @@ export type BuiltinContextMenuAction =
   | 'cut'
   | 'copy'
   | 'copy-image'
+  | 'reveal-image'
+  | 'save-image'
   | 'paste'
   | 'select-all'
   | 'open-link-in-browser'
@@ -19,6 +22,8 @@ export const BUILTIN_CONTEXT_MENU_ACTIONS: Readonly<Record<string, BuiltinContex
   'desktop.cut': 'cut',
   'desktop.copy': 'copy',
   'desktop.copy-image': 'copy-image',
+  'desktop.reveal-image': 'reveal-image',
+  'desktop.save-image': 'save-image',
   'desktop.paste': 'paste',
   'desktop.select-all': 'select-all',
   'desktop.open-link-in-browser': 'open-link-in-browser',
@@ -52,13 +57,13 @@ function appendGroup(items: ContextMenuEntry[], group: ContextMenuActionEntry[],
 
 export function buildBuiltinContextMenuItems(
   snapshot: ContextMenuSnapshot,
-  options: { embeddedBrowserEnabled?: boolean } = {},
+  options: { embeddedBrowserEnabled?: boolean; platform?: NodeJS.Platform; imageCanReveal?: boolean } = {},
 ): ContextMenuEntry[] {
   const items: ContextMenuEntry[] = []
   const copyableImage = (snapshot.mediaType === 'image'
       && (snapshot.hasImageContents === true || Boolean(snapshot.srcURL)))
     || snapshot.mediaType === 'canvas'
-  if (/^https?:\/\//iu.test(snapshot.linkURL)) {
+  if (isSupportedBrowserUrl(snapshot.linkURL)) {
     appendGroup(items, [
       action('desktop.open-link-in-browser', '在内置浏览器中打开', 'browser', options.embeddedBrowserEnabled === true),
       action('desktop.open-link', '在默认浏览器中打开', 'external-link', true),
@@ -67,8 +72,13 @@ export function buildBuiltinContextMenuItems(
   }
 
   if (copyableImage) {
+    const platform = options.platform ?? process.platform
+    const revealLabel = platform === 'darwin' ? '在访达中显示'
+      : platform === 'win32' ? '在资源管理器中打开' : '在文件管理器中显示'
     appendGroup(items, [
       action('desktop.copy-image', '复制', 'copy', true),
+      ...(options.imageCanReveal === true ? [action('desktop.reveal-image', revealLabel, 'folder', true)] : []),
+      action('desktop.save-image', '下载副本', 'download', true),
     ], 'image')
   }
 

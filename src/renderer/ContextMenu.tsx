@@ -3,6 +3,7 @@ import {
   Check,
   ClipboardPaste,
   Copy,
+  Download,
   ExternalLink,
   FolderOpen,
   Link,
@@ -44,6 +45,7 @@ const menuIcons: Record<ContextMenuIcon, LucideIcon> = {
   terminal: Terminal,
   sparkles: Sparkles,
   refresh: RefreshCw,
+  download: Download,
 }
 
 interface ContextMenuProps {
@@ -61,19 +63,27 @@ export function ContextMenu({ menu, onSelect, presentationPending = false, prese
     const place = (): void => {
       const element = card.current
       if (element === null) return
-      setPosition(clampContextMenuPosition(
+      const next = clampContextMenuPosition(
         menu.x,
         menu.y,
         element.offsetWidth,
         element.offsetHeight,
         window.innerWidth,
         window.innerHeight,
-      ))
+      )
+      setPosition((current) => current.x === next.x && current.y === next.y ? current : next)
     }
     place()
+    // Contributions arrive after the initial menu. Reposition before paint,
+    // then keep tracking dimensions when fonts or the available space change.
+    const observer = new ResizeObserver(place)
+    if (card.current !== null) observer.observe(card.current)
     window.addEventListener('resize', place)
-    return () => window.removeEventListener('resize', place)
-  }, [menu.requestId, menu.x, menu.y])
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', place)
+    }
+  }, [menu.requestId, menu.x, menu.y, menu.items])
 
   return (
     <section

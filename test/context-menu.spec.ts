@@ -49,7 +49,10 @@ describe('desktop context menu protocol', () => {
       token: 'menu-file',
       items: [],
       linkURL: 'file:///C:/private/index.html',
-    })).toBeUndefined()
+    })).toEqual({ token: 'menu-file', items: [], linkURL: 'file:///C:/private/index.html' })
+    for (const linkURL of ['file:///C:/private/config.json', 'file://server/share/index.html', 'javascript:alert(1)', 'data:text/html,hello']) {
+      expect(parsePluginContextMenuCollection({ token: 'menu-file', items: [], linkURL })).toBeUndefined()
+    }
   })
 
   it('keeps the menu inside the viewport', () => {
@@ -131,7 +134,7 @@ describe('desktop context menu protocol', () => {
     ])
   })
 
-  it('offers one copy action for image contents', () => {
+  it('offers image copy, Windows Explorer and a native-save action', () => {
     const items = buildBuiltinContextMenuItems({
       isEditable: false,
       selectionText: '',
@@ -149,10 +152,12 @@ describe('desktop context menu protocol', () => {
         canSelectAll: true,
         canEditRichly: false,
       },
-    })
+    }, { platform: 'win32', imageCanReveal: true })
 
     expect(items.filter((entry) => entry.kind === 'item')).toEqual([
       { kind: 'item', id: 'desktop.copy-image', label: '复制', enabled: true, icon: 'copy' },
+      { kind: 'item', id: 'desktop.reveal-image', label: '在资源管理器中打开', enabled: true, icon: 'folder' },
+      { kind: 'item', id: 'desktop.save-image', label: '下载副本', enabled: true, icon: 'download' },
     ])
   })
 
@@ -174,11 +179,25 @@ describe('desktop context menu protocol', () => {
         canSelectAll: true,
         canEditRichly: false,
       },
-    })
+    }, { platform: 'darwin', imageCanReveal: true })
 
     expect(items.filter((entry) => entry.kind === 'item')).toEqual([
       { kind: 'item', id: 'desktop.copy-image', label: '复制', enabled: true, icon: 'copy' },
+      { kind: 'item', id: 'desktop.reveal-image', label: '在访达中显示', enabled: true, icon: 'folder' },
+      { kind: 'item', id: 'desktop.save-image', label: '下载副本', enabled: true, icon: 'download' },
     ])
+  })
+
+  it('only offers copy and download for memory images on either desktop platform', () => {
+    for (const platform of ['win32', 'darwin'] as const) {
+      const items = buildBuiltinContextMenuItems({
+        isEditable: false, selectionText: '', linkURL: '', srcURL: 'blob:http://localhost/image',
+        mediaType: 'image', hasImageContents: true,
+        editFlags: { canUndo: false, canRedo: false, canCut: false, canCopy: false,
+          canPaste: false, canDelete: false, canSelectAll: true, canEditRichly: false },
+      }, { platform })
+      expect(items.map((item) => item.id)).toEqual(['desktop.copy-image', 'desktop.save-image'])
+    }
   })
 
   it('places plugin contributions behind a stable separator', () => {

@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom'
 import type { BrowserDisplayMode, DesktopApplicationMenuAction, DesktopBrowserHistoryEntry, DesktopBrowserShellSnapshot, DesktopBrowserViewport, DesktopState, DevelopmentState, ManagedPluginEntry, PluginInventory, PluginMutationResult, PluginRecoveryEntry, PluginSourceType } from '../shared/contracts.js'
 import type { ContextMenuEntry, DesktopContextMenuRequest } from '../shared/context-menu.js'
 import { gitRepositoryWebUrl } from '../shared/plugin-source.js'
+import { BrowserAddressInput } from './BrowserAddressInput.js'
 import { AgentPointerIcon } from './AgentPointerIcon.js'
 import { ContextMenu } from './ContextMenu.js'
 import appIconUrl from '../../app-icon.png'
@@ -834,8 +835,6 @@ export function App(): ReactNode {
   const [startupActionPending, setStartupActionPending] = useState(false)
   const [startupActionError, setStartupActionError] = useState<string>()
   const [contextMenu, setContextMenu] = useState<DesktopContextMenuRequest>()
-  const [browserAddress, setBrowserAddress] = useState('')
-  const [browserAddressFocused, setBrowserAddressFocused] = useState(false)
   const [browserHistoryOpen, setBrowserHistoryOpen] = useState(false)
   const [browserHistory, setBrowserHistory] = useState<DesktopBrowserHistoryEntry[]>([])
   const [browserDisplayMenuOpen, setBrowserDisplayMenuOpen] = useState(false)
@@ -901,10 +900,6 @@ export function App(): ReactNode {
     document.documentElement.dataset.platform = state.platform
     document.body.classList.toggle('maximized', state.isMaximized)
   }, [state])
-
-  useEffect(() => {
-    if (!browserAddressFocused) setBrowserAddress(state?.browser.url ?? '')
-  }, [browserAddressFocused, state?.browser.url])
 
   useEffect(() => {
     if (state?.browser.panelOpen === false) {
@@ -1424,10 +1419,7 @@ export function App(): ReactNode {
                 <button type="button" aria-label="前进" disabled={!state?.browser.canGoForward} onClick={() => void desktopApi.browserNavigationAction('forward')}><ArrowRight /></button>
                 <button type="button" aria-label={state?.browser.loading ? '停止加载' : '重新加载'} onClick={() => void desktopApi.browserNavigationAction(state?.browser.loading ? 'stop' : 'reload')}><RotateCw className={state?.browser.loading ? 'browser-loading' : ''} /></button>
               </div>
-              <form className="browser-address" onSubmit={(event) => { event.preventDefault(); void navigateBrowser(browserAddress) }}>
-                <Globe2 aria-hidden="true" />
-                <input value={browserAddress} aria-label="网页地址" placeholder="输入网址或搜索内容" spellCheck={false} onFocus={() => setBrowserAddressFocused(true)} onBlur={() => setBrowserAddressFocused(false)} onChange={(event) => setBrowserAddress(event.target.value)} />
-              </form>
+              <BrowserAddressInput className="browser-address" url={state?.browser.url ?? ''} onNavigate={navigateBrowser} />
               <div className="browser-actions">
                 <button type="button" aria-label="浏览器设置" aria-expanded={browserSettingsMenuOpen} onClick={(event) => openBrowserMenu('settings', event.currentTarget)}><MoreVertical /></button>
               </div>

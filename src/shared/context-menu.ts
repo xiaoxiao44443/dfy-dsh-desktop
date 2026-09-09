@@ -1,3 +1,5 @@
+import { normalizeBrowserPageUrl } from './browser-address.js'
+
 export const CONTEXT_MENU_ICONS = [
   'copy',
   'cut',
@@ -17,6 +19,7 @@ export const CONTEXT_MENU_ICONS = [
   'terminal',
   'sparkles',
   'refresh',
+  'download',
 ] as const
 
 export const DESKTOP_CONTEXT_MENU_TRANSPORT_KEY = 'dsh.desktop.context-menu.transport.v1'
@@ -80,15 +83,10 @@ function boundedText(value: unknown, maxLength: number): string | undefined {
   return text.length > 0 && text.length <= maxLength && !/[\r\n\0]/u.test(text) ? text : undefined
 }
 
-function safeWebURL(value: unknown): string | undefined {
+function safeBrowserURL(value: unknown): string | undefined {
   const text = boundedText(value, 2_048)
   if (text === undefined) return undefined
-  try {
-    const url = new URL(text)
-    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : undefined
-  } catch {
-    return undefined
-  }
+  return normalizeBrowserPageUrl(text)
 }
 
 function parseEntry(value: unknown): ContextMenuEntry | undefined {
@@ -139,7 +137,7 @@ export function parsePluginContextMenuCollection(value: unknown): PluginContextM
   if (token === undefined) return undefined
   const items = sanitizeContextMenuEntries(candidate?.items)
     .filter((entry) => entry.kind === 'separator' || entry.id.startsWith('plugin.'))
-  const linkURL = safeWebURL(candidate?.linkURL)
+  const linkURL = safeBrowserURL(candidate?.linkURL)
   if (!items.some((entry) => entry.kind === 'item') && linkURL === undefined) return undefined
   return { token, items, ...(linkURL === undefined ? {} : { linkURL }) }
 }

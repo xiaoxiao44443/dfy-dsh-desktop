@@ -1,4 +1,7 @@
 import type { Rectangle } from 'electron'
+import { isAbsolute } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { normalizeBrowserPageUrl, normalizeLocalHtmlUrl } from '../shared/browser-address.js'
 import type {
   BrowserAgentOpenMode,
   BrowserDisplayMode,
@@ -36,17 +39,28 @@ export function normalizeBrowserSettings(value: unknown): DesktopBrowserSettings
 export function normalizeBrowserAddress(value: string, allowSearch = true): string {
   const input = value.trim()
   if (input.length === 0) throw new Error('请输入网页地址。')
+  if (/^file:/iu.test(input) || isAbsolute(input) || /^[a-z]:[\\/]/iu.test(input)) {
+    const localUrl = /^file:/iu.test(input)
+      ? normalizeLocalHtmlUrl(input)
+      : isAbsolute(input) && !/[\0\r\n]/u.test(input) && !/^(?:\\\\|\/\/)/u.test(input)
+        && (process.platform !== 'win32' || /^[a-z]:[\\/]/iu.test(input))
+        ? normalizeLocalHtmlUrl(pathToFileURL(input).href)
+        : undefined
+    if (localUrl === undefined) throw new Error('本地网页需要使用绝对路径或 file: 地址，且文件类型为 HTML、HTM 或 XHTML。')
+    return localUrl
+  }
   if (/^https?:\/\//iu.test(input)) {
-    const url = new URL(input)
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('只支持 HTTP 和 HTTPS 网页。')
-    return url.href
+    const url = normalizeBrowserPageUrl(input)
+    if (url === undefined) throw new Error('网页地址无效。')
+    return url
   }
   if (/^[\w.-]+(?::\d+)?(?:\/[^\s]*)?$/u.test(input)) {
     const hostname = input.split(/[/:]/u, 1)[0]?.toLowerCase()
     const scheme = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]' ? 'http' : 'https'
     return new URL(`${scheme}://${input}`).href
   }
-  if (!allowSearch) throw new Error('工具调用需要提供完整的 HTTP 或 HTTPS 地址。')
+  if (/^[a-z][a-z\d+.-]*:/iu.test(input)) throw new Error('只支持 HTTP、HTTPS 和本地 HTML 网页。')
+  if (!allowSearch) throw new Error('工具调用需要提供完整的 HTTP、HTTPS 或本地 HTML 地址。')
   return `https://www.bing.com/search?q=${encodeURIComponent(input)}`
 }
 
@@ -60,8 +74,9 @@ export function normalizeBrowserHistory(value: unknown): DesktopBrowserHistoryEn
     if (item === null || typeof item !== 'object' || Array.isArray(item)) continue
     const source = item as Record<string, unknown>
     if (typeof source.id !== 'string' || typeof source.url !== 'string' || typeof source.title !== 'string' || typeof source.visitedAt !== 'string') continue
-    if (!/^https?:\/\//iu.test(source.url) || Number.isNaN(Date.parse(source.visitedAt))) continue
-    entries.push({ id: source.id, url: source.url, title: source.title, visitedAt: source.visitedAt })
+    const url = normalizeBrowserPageUrl(source.url)
+    if (url === undefined || Number.isNaN(Date.parse(source.visitedAt))) continue
+    entries.push({ id: source.id, url, title: source.title, visitedAt: source.visitedAt })
     if (entries.length >= MAX_HISTORY_ENTRIES) break
   }
   return entries

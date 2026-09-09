@@ -1,6 +1,13 @@
 import { EventEmitter } from 'node:events'
 import { describe, expect, it, vi } from 'vitest'
 
+const imageActionMocks = vi.hoisted(() => ({
+  findContextMenuImagePath: vi.fn(async (): Promise<string | undefined> => undefined),
+  revealContextMenuImage: vi.fn(async () => undefined),
+  saveContextMenuImage: vi.fn(async () => undefined),
+}))
+vi.mock('../src/main/image-actions.js', () => imageActionMocks)
+
 const electronMocks = vi.hoisted(() => ({
   clipboardImage: { isEmpty: () => false },
   clipboardWriteImage: vi.fn(),
@@ -21,6 +28,7 @@ const electronMocks = vi.hoisted(() => ({
       }
       send: ReturnType<typeof vi.fn>
       copyImageAt: ReturnType<typeof vi.fn>
+      copy: ReturnType<typeof vi.fn>
     }
   },
 }))
@@ -103,6 +111,68 @@ import {
 } from '../src/main/window-controller.js'
 import { RUNTIME_PREPARATION_PROGRESS_EVENT } from '../src/main/harness-runtime.js'
 import { DESKTOP_CONTEXT_MENU_TRANSPORT_KEY } from '../src/shared/context-menu.js'
+
+describe('image menu discovery and dispatch', () => {
+  it.each(['image-first', 'plugin-first'] as const)('keeps original-file and plugin actions when %s finishes', async (order) => {
+    let resolvePath!: (path: string | undefined) => void
+    let resolvePlugin!: (collection: unknown) => void
+    imageActionMocks.findContextMenuImagePath.mockImplementationOnce(() => new Promise((resolve) => { resolvePath = resolve }))
+    const collection = new Promise((resolve) => { resolvePlugin = resolve })
+    const runtime = Object.assign(new EventEmitter(), {
+      harnessHome: '/existing-harness', updateState: { status: 'idle' }, checkForUpdates: vi.fn(),
+    })
+    const development = Object.assign(new EventEmitter(), {
+      state: { pnpmVersion: '11.19.0', restarting: false, commandRunning: false },
+    })
+    const controller = new WindowController(runtime as never, development as never)
+    await controller.create()
+    const url = 'http://127.0.0.1:43219'
+    const frame = { parent: {}, name: 'harness-frame', url, isDestroyed: () => false,
+      executeJavaScript: vi.fn(async (script: string) => {
+        if (script === 'document.readyState') return 'complete'
+        if (script.includes('?.collect?.()')) return collection
+        return null
+      }),
+    }
+    const window = electronMocks.window!
+    window.webContents.mainFrame.framesInSubtree = [frame]
+    await controller.showHarness(url, '0.1.5-alpha.1')
+    const params = {
+      frame, frameURL: url, x: 20, y: 40, linkURL: '', srcURL: `blob:${url}/image`,
+      selectionText: '', mediaType: 'image', hasImageContents: true, isEditable: false,
+      editFlags: { canUndo: false, canRedo: false, canCut: false, canCopy: false,
+        canPaste: false, canDelete: false, canSelectAll: true, canEditRichly: false },
+    }
+    window.webContents.emit('context-menu', { preventDefault: vi.fn() }, params)
+    const menus = () => window.webContents.send.mock.calls.filter(([channel]) => channel === 'desktop:context-menu')
+    const plugin = { token: 'image-plugin-token', items: [{ kind: 'item', id: 'plugin.inspect', label: '检查', enabled: true }] }
+    const first = menus().at(-1)![1]
+    expect(first.items.map((item: { id: string }) => item.id)).toEqual(['desktop.copy-image', 'desktop.save-image'])
+    if (order === 'image-first') {
+      resolvePath('/existing/original.png')
+      await vi.waitFor(() => expect(menus().at(-1)![1].items).toContainEqual(expect.objectContaining({ id: 'desktop.reveal-image' })))
+      resolvePlugin(plugin)
+    } else {
+      resolvePlugin(plugin)
+      await vi.waitFor(() => expect(menus().at(-1)![1].items).toContainEqual(expect.objectContaining({ id: 'plugin.inspect' })))
+      resolvePath('/existing/original.png')
+    }
+    await vi.waitFor(() => {
+      const ids = menus().at(-1)![1].items.map((item: { id: string }) => item.id)
+      expect(ids).toContain('plugin.inspect')
+      expect(ids.filter((id: string) => id === 'desktop.reveal-image')).toHaveLength(1)
+    })
+    const select = electronMocks.ipcHandlers.get('desktop:context-menu-select')!
+    await select({ sender: window.webContents }, { requestId: first.requestId, itemId: 'desktop.reveal-image' })
+    expect(imageActionMocks.revealContextMenuImage).toHaveBeenCalledWith('/existing/original.png')
+
+    // Memory-only images still dispatch an explicit save through the source frame.
+    window.webContents.emit('context-menu', { preventDefault: vi.fn() }, params)
+    const memory = menus().at(-1)![1]
+    await select({ sender: window.webContents }, { requestId: memory.requestId, itemId: 'desktop.save-image' })
+    expect(imageActionMocks.saveContextMenuImage).toHaveBeenCalledWith(expect.objectContaining({ frame, srcURL: params.srcURL }), window)
+  })
+})
 
 describe('Harness theme preference parsing', () => {
   it('recognizes explicit and system preferences without matching unrelated settings', () => {
@@ -461,7 +531,10 @@ describe('WindowController Harness reload', () => {
     })
     const imageRequest = window?.webContents.send.mock.calls.filter(([channel]) => channel === 'desktop:context-menu').at(-1)?.[1]
     expect(imageRequest).toMatchObject({
-      items: [expect.objectContaining({ id: 'desktop.copy-image', label: '复制', enabled: true })],
+      items: [
+        expect.objectContaining({ id: 'desktop.copy-image', label: '复制', enabled: true }),
+        expect.objectContaining({ id: 'desktop.save-image', label: '下载副本', enabled: true }),
+      ],
     })
     if (select !== undefined && window !== undefined && imageRequest !== undefined) {
       await select({ sender: window.webContents }, { requestId: imageRequest.requestId, itemId: 'desktop.copy-image' })
@@ -642,6 +715,32 @@ describe('WindowController Harness reload', () => {
       y: 260,
       button: 'left',
     })
+  })
+
+  it('preserves address-field copy handlers when the script command needs a native fallback', async () => {
+    const runtime = Object.assign(new EventEmitter(), {
+      harnessHome: '/path/that/does/not/exist', updateState: { status: 'idle' },
+    })
+    const development = Object.assign(new EventEmitter(), {
+      state: { pnpmVersion: '11.19.0', restarting: false, commandRunning: false },
+    })
+    const controller = new WindowController(runtime as never, development as never)
+    await controller.create()
+    const window = electronMocks.window!
+    const readable = 'file:///E:/项目文件/播放器.html'
+    window.webContents.mainFrame.executeJavaScript.mockResolvedValue(false)
+    window.webContents.emit('context-menu', { preventDefault: vi.fn() }, {
+      frame: window.webContents.mainFrame, frameURL: window.webContents.mainFrame.url,
+      x: 20, y: 40, linkURL: '', srcURL: '', selectionText: readable, isEditable: true,
+      editFlags: { canUndo: false, canRedo: false, canCut: true, canCopy: true,
+        canPaste: true, canDelete: true, canSelectAll: true, canEditRichly: false },
+    })
+    const request = window.webContents.send.mock.calls.find(([channel]) => channel === 'desktop:context-menu')![1]
+    await electronMocks.ipcHandlers.get('desktop:context-menu-select')!(
+      { sender: window.webContents }, { requestId: request.requestId, itemId: 'desktop.copy' },
+    )
+    expect(window.webContents.copy).toHaveBeenCalledOnce()
+    expect(electronMocks.clipboardWriteText).not.toHaveBeenCalledWith(readable)
   })
 
   it('ignores right clicks outside desktop shell inputs', async () => {
