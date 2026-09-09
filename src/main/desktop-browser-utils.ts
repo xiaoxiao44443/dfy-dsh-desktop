@@ -39,10 +39,11 @@ export function normalizeBrowserSettings(value: unknown): DesktopBrowserSettings
 export function normalizeBrowserAddress(value: string, allowSearch = true): string {
   const input = value.trim()
   if (input.length === 0) throw new Error('请输入网页地址。')
+  if (/^(?:\\\\|\/\/)/u.test(input)) throw new Error('不支持网络共享路径，请使用本机的 HTML 网页。')
   if (/^file:/iu.test(input) || isAbsolute(input) || /^[a-z]:[\\/]/iu.test(input)) {
     const localUrl = /^file:/iu.test(input)
       ? normalizeLocalHtmlUrl(input)
-      : isAbsolute(input) && !/[\0\r\n]/u.test(input) && !/^(?:\\\\|\/\/)/u.test(input)
+      : isAbsolute(input) && !/[\0\r\n]/u.test(input)
         && (process.platform !== 'win32' || /^[a-z]:[\\/]/iu.test(input))
         ? normalizeLocalHtmlUrl(pathToFileURL(input).href)
         : undefined

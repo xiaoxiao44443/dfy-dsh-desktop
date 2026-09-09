@@ -62,6 +62,10 @@ pnpm package:mac:arm64
 
 Harness 运行时包含平台相关的原生依赖，因此 `prepare:runtime` 必须在目标平台和架构上执行。仓库提供 `.github/workflows/build-macos-intel.yml` 和 `.github/workflows/build-macos-arm64.yml`，分别使用 Intel 和 ARM64 macOS Runner 准备运行时、构建 DMG/ZIP，并检查打包后的 Electron、原生依赖和 Harness 启动入口。推送 `v*` 标签会构建 Windows x64、macOS Intel、macOS Apple Silicon 三个平台，统一发布安装包与 SHA-256 校验文件。客户端更新会选择对应架构的安装包。
 
+暂定版本规则：桌面端默认与内置 DSH 使用相同版本号；同一 DSH 版本下再次更新桌面端时，追加 `-1`、`-2` 等递增修订号。例如 DSH 为 `0.1.5-alpha.1` 时，桌面端依次发布 `0.1.5-alpha.1`、`0.1.5-alpha.1-1`、`0.1.5-alpha.1-2`；升级 DSH 后重新从其原版本号开始。Git 标签使用 `v` 前缀，发布说明保存在 `.github/release-notes/<标签>.md`。
+
+桌面更新先比较 DSH 基础版本，再按数值比较桌面修订号；正式版或预发布版的渠道也以 DSH 基础版本为准。
+
 当前 macOS 产物使用本地 ad-hoc 签名，未接入 Developer ID 签名和 Apple 公证，适合测试。
 
 macOS 使用原生红黄绿窗口按钮，并直接从 App Resources 启动随包运行时，不需要在首次启动时解压。桌面壳自己的状态仍位于 `~/.saltfish/dfy-dsh-desktop`，Harness 官方数据仍位于 `~/.dsh`。

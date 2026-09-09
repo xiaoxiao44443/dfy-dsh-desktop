@@ -49,8 +49,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           prerelease=()
-          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+          is_prerelease=false
+          harness_version="${GITHUB_REF_NAME#v}"
+          # Desktop-only revisions inherit the base Harness release channel.
+          if [[ "$harness_version" =~ ^(.+)-[0-9]+(\.[0-9]+)*$ ]]; then
+            harness_version="${BASH_REMATCH[1]}"
+          fi
+          if [[ "$harness_version" == *-* ]]; then
             prerelease+=(--prerelease)
+            is_prerelease=true
           fi
           notes_file=".github/release-notes/${GITHUB_REF_NAME}.md"
           notes=(--generate-notes)
@@ -62,9 +69,11 @@ jobs:
             gh release upload "$GITHUB_REF_NAME" release-assets/* \
               --repo "$GITHUB_REPOSITORY" \
               --clobber
+            edit_options=(--prerelease="$is_prerelease")
             if [[ -f "$notes_file" ]]; then
-              gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --notes-file "$notes_file"
+              edit_options+=(--notes-file "$notes_file")
             fi
+            gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" "${edit_options[@]}"
           else
             gh release create "$GITHUB_REF_NAME" release-assets/* \
               --repo "$GITHUB_REPOSITORY" \

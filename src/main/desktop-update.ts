@@ -63,6 +63,34 @@ function releaseVersion(tag: string): string | undefined {
   return semver.valid(normalized) ?? undefined
 }
 
+function desktopVersion(version: string): { base: string; revision: bigint[] } {
+  const normalized = new semver.SemVer(version).version
+  // Desktop-only releases append -N to a DSH version. Keep legacy -N.M releases ordered too.
+  const match = /^(.*)-(\d+(?:\.\d+)*)$/u.exec(normalized)
+  const revision = match?.[2]
+  const base = match?.[1] === undefined ? null : semver.valid(match[1])
+  if (base === null || revision === undefined) return { base: normalized, revision: [] }
+  return { base, revision: revision.split('.').map((part) => BigInt(part)) }
+}
+
+function compareDesktopVersions(left: string, right: string): number {
+  const a = desktopVersion(left)
+  const b = desktopVersion(right)
+  const baseOrder = semver.compare(a.base, b.base)
+  if (baseOrder !== 0) return baseOrder
+  for (const [index, leftRevision] of a.revision.entries()) {
+    const rightRevision = b.revision[index]
+    if (rightRevision === undefined) return 1
+    if (leftRevision !== rightRevision) return leftRevision > rightRevision ? 1 : -1
+  }
+  return a.revision.length - b.revision.length
+}
+
+function isDesktopPrerelease(version: string, githubPrerelease = false): boolean {
+  const parsed = desktopVersion(version)
+  return semver.prerelease(parsed.base) !== null || (parsed.revision.length === 0 && githubPrerelease)
+}
+
 function safeAssetName(name: string): boolean {
   return name.length > 0 && name.length <= 240 && basename(name) === name && !/[\0\r\n]/u.test(name)
 }
@@ -150,7 +178,7 @@ export class DesktopUpdateService extends EventEmitter {
     await mkdir(this.options.updatesRoot, { recursive: true })
     const pending = await this.readPending()
     if (pending === undefined) await this.removeOnStartup(join(this.options.updatesRoot, PENDING_FILE))
-    if (pending !== undefined && semver.gte(this.options.currentVersion, pending.version)) {
+    if (pending !== undefined && compareDesktopVersions(this.options.currentVersion, pending.version) >= 0) {
       await this.removePendingOnStartup(pending)
     } else if (pending !== undefined) {
       const path = this.pendingInstallerPath(pending)
@@ -230,7 +258,7 @@ export class DesktopUpdateService extends EventEmitter {
       if (!response.ok) throw new Error(`GitHub Release 查询失败（HTTP ${response.status}）。`)
       const payload = await response.json() as unknown
       if (!Array.isArray(payload)) throw new Error('GitHub Release 返回了无法识别的数据。')
-      const currentIsPrerelease = semver.prerelease(this.options.currentVersion) !== null
+      const currentIsPrerelease = isDesktopPrerelease(this.options.currentVersion)
       const releases = payload.filter((value): value is GitHubRelease => {
         if (value === null || typeof value !== 'object') return false
         const release = value as Partial<GitHubRelease>
@@ -244,9 +272,9 @@ export class DesktopUpdateService extends EventEmitter {
         .map((entry) => ({ entry, version: releaseVersion(entry.tag_name) }))
         .filter((entry): entry is { entry: GitHubRelease; version: string } => entry.version !== undefined)
         .filter(({ entry, version }) => !entry.draft
-          && (currentIsPrerelease || !entry.prerelease)
-          && semver.gt(version, this.options.currentVersion))
-        .sort((left, right) => semver.rcompare(left.version, right.version))[0]
+          && (currentIsPrerelease || !isDesktopPrerelease(version, entry.prerelease))
+          && compareDesktopVersions(version, this.options.currentVersion) > 0)
+        .sort((left, right) => compareDesktopVersions(right.version, left.version))[0]
       if (release === undefined) {
         this.candidate = undefined
         this.setState({ status: 'current', message: '当前桌面端已经是最新版本。' })

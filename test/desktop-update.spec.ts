@@ -40,6 +40,69 @@ function releasePayload(version: string, installer: Buffer, prerelease = true, a
 }
 
 describe('DesktopUpdateService', () => {
+  it.each([
+    { current: '0.1.5-alpha.1', available: ['0.1.5-alpha.1-1'], expected: '0.1.5-alpha.1-1' },
+    { current: '0.1.5-alpha.1-2', available: ['0.1.5-alpha.1-3', '0.1.5-alpha.1-10', '0.1.5-alpha.1-2'], expected: '0.1.5-alpha.1-10' },
+    { current: '0.1.5-alpha.1-1', available: ['0.1.5-alpha.1-10', '0.1.5-alpha.2'], expected: '0.1.5-alpha.2' },
+    { current: '1.2.3', available: ['1.2.3-1'], expected: '1.2.3-1' },
+    { current: '1.2.3-1', available: ['1.3.0-alpha.1', '1.2.3-2'], expected: '1.2.3-2' },
+    { current: '0.1.2-rc.1-1', available: ['0.1.2-rc.1-1.1'], expected: '0.1.2-rc.1-1.1' },
+    { current: '0.1.2-rc.1-1.1', available: ['0.1.2-rc.1-2', '0.1.2-rc.2'], expected: '0.1.2-rc.2' },
+  ])('selects $expected from desktop version $current', async ({ current, available, expected }) => {
+    const installer = Buffer.from('desktop installer')
+    // Older publishing workflows also marked stable-base desktop revisions as prereleases.
+    const releases = available.flatMap((version) => releasePayload(version, installer, version.includes('-')))
+    const service = new DesktopUpdateService({
+      updatesRoot: await updateRoot(), currentVersion: current, platform: 'darwin', arch: 'x64',
+      fetcher: vi.fn(async () => new Response(JSON.stringify(releases))),
+    })
+    await service.initialize()
+    await service.checkForUpdates()
+    expect(service.state).toMatchObject({ status: 'available', version: expected })
+  })
+
+  it('keeps stable desktop revisions on the stable channel and never offers an older revision', async () => {
+    const installer = Buffer.from('desktop installer')
+    const releases = [
+      ...releasePayload('1.2.3-2', installer),
+      ...releasePayload('1.2.4-alpha.1', installer, false),
+      ...releasePayload('1.2.4', installer, true),
+    ]
+    const service = new DesktopUpdateService({
+      updatesRoot: await updateRoot(), currentVersion: '1.2.3-10', platform: 'darwin', arch: 'x64',
+      fetcher: vi.fn(async () => new Response(JSON.stringify(releases))),
+    })
+    await service.initialize()
+    await service.checkForUpdates()
+    expect(service.state.status).toBe('current')
+  })
+
+  it.each([
+    { current: '0.1.5-alpha.2', pending: '0.1.5-alpha.1-1', keep: false },
+    { current: '0.1.5-alpha.1-10', pending: '0.1.5-alpha.1-2', keep: false },
+    { current: '1.2.3', pending: '1.2.3-1', keep: true },
+    { current: '0.1.5-alpha.1-2', pending: '0.1.5-alpha.1-10', keep: true },
+  ])('handles a pending $pending installer while running $current', async ({ current, pending, keep }) => {
+    const root = await updateRoot()
+    const assetName = `DFY-DSH-Desktop-${pending}-macos-x64.dmg`
+    await mkdir(join(root, pending))
+    await writeFile(join(root, pending, assetName), 'downloaded installer')
+    await writeFile(join(root, 'pending.json'), JSON.stringify({
+      version: pending, assetName, downloadedAt: '2026-09-09T00:00:00Z',
+    }))
+    const service = new DesktopUpdateService({
+      updatesRoot: root, currentVersion: current, platform: 'darwin', arch: 'x64',
+    })
+    await service.initialize()
+    if (keep) {
+      expect(service.state).toMatchObject({ status: 'ready', version: pending })
+      expect(await service.installerPath()).toBe(join(root, pending, assetName))
+    } else {
+      expect(service.state.status).toBe('idle')
+      expect(await readdir(root)).toEqual([])
+    }
+  })
+
   it('checks GitHub metadata without downloading an installer', async () => {
     const installer = Buffer.from('desktop installer')
     const fetcher = vi.fn(async (input: string | URL | Request) => {
