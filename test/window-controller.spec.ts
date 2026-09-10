@@ -113,6 +113,99 @@ import { RUNTIME_PREPARATION_PROGRESS_EVENT } from '../src/main/harness-runtime.
 import { DESKTOP_CONTEXT_MENU_TRANSPORT_KEY } from '../src/shared/context-menu.js'
 
 describe('image menu discovery and dispatch', () => {
+  async function imageMenuFixture() {
+    const runtime = Object.assign(new EventEmitter(), {
+      harnessHome: '/existing-harness', updateState: { status: 'idle' }, checkForUpdates: vi.fn(),
+    })
+    const development = Object.assign(new EventEmitter(), {
+      state: { pnpmVersion: '11.19.0', restarting: false, commandRunning: false },
+    })
+    const browser = Object.assign(new EventEmitter(), {
+      state: { settings: { enabled: true } }, setTheme: vi.fn(), attachWindow: vi.fn(),
+      closeMenu: vi.fn(), openContextMenu: vi.fn(async () => true), updateContextMenu: vi.fn(),
+    })
+    const controller = new WindowController(runtime as never, development as never, undefined, browser as never)
+    await controller.create()
+    const url = 'http://127.0.0.1:43219'
+    const frame = { parent: {}, name: 'harness-frame', url, isDestroyed: () => false,
+      executeJavaScript: vi.fn(async (script: string) => script === 'document.readyState' ? 'complete' : null),
+    }
+    const window = electronMocks.window!
+    window.webContents.mainFrame.framesInSubtree = [frame]
+    await controller.showHarness(url, '0.1.5-alpha.2')
+    const params = {
+      frame, frameURL: url, x: 20, y: 40, linkURL: '', srcURL: `blob:${url}/image`,
+      selectionText: '', mediaType: 'image', hasImageContents: true, isEditable: false,
+      editFlags: { canUndo: false, canRedo: false, canCut: false, canCopy: false,
+        canPaste: false, canDelete: false, canSelectAll: true, canEditRichly: false },
+    }
+    const open = () => window.webContents.emit('context-menu', { preventDefault: vi.fn() }, params)
+    const menus = () => window.webContents.send.mock.calls.filter(([channel]) => channel === 'desktop:context-menu')
+    return { controller, browser, frame, window, params, open, menus }
+  }
+
+  it('shows one stable fallback menu when original-file lookup is slow', async () => {
+    const fixture = await imageMenuFixture()
+    let resolvePath!: (path: string) => void
+    imageActionMocks.findContextMenuImagePath.mockImplementationOnce(() => new Promise((resolve) => { resolvePath = resolve }))
+    fixture.open()
+    expect(fixture.menus()).toHaveLength(0)
+    await vi.waitFor(() => expect(fixture.menus()).toHaveLength(1), { timeout: 1500 })
+    expect(fixture.menus()[0]![1].items.map((item: { id: string }) => item.id))
+      .toEqual(['desktop.copy-image', 'desktop.save-image'])
+    resolvePath('/existing/late-original.png')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(fixture.menus()).toHaveLength(1)
+  })
+
+  it.each(['pointer', 'escape', 'navigation'] as const)('does not open a delayed image menu after %s', async (action) => {
+    const fixture = await imageMenuFixture()
+    let resolvePath!: (path: string) => void
+    imageActionMocks.findContextMenuImagePath.mockImplementationOnce(() => new Promise((resolve) => { resolvePath = resolve }))
+    fixture.open()
+    if (action === 'pointer') fixture.window.webContents.emit('before-mouse-event', {}, { type: 'mouseDown', button: 'left', x: 50, y: 60 })
+    else if (action === 'escape') fixture.window.webContents.emit('before-input-event', {}, { type: 'keyDown', key: 'Escape' })
+    else fixture.window.webContents.emit('did-start-navigation', {})
+    resolvePath('/existing/original.png')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(fixture.menus()).toHaveLength(0)
+    expect(fixture.window.webContents.listenerCount('did-start-navigation')).toBe(0)
+  })
+
+  it('keeps a newer right-click menu when an earlier image lookup finishes', async () => {
+    const fixture = await imageMenuFixture()
+    let resolvePath!: (path: string) => void
+    imageActionMocks.findContextMenuImagePath.mockImplementationOnce(() => new Promise((resolve) => { resolvePath = resolve }))
+    fixture.open()
+    imageActionMocks.findContextMenuImagePath.mockResolvedValueOnce('/existing/newer.png')
+    fixture.open()
+    await vi.waitFor(() => expect(fixture.menus()).toHaveLength(1))
+    resolvePath('/existing/older.png')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(fixture.menus()).toHaveLength(1)
+    const select = electronMocks.ipcHandlers.get('desktop:context-menu-select')!
+    await select({ sender: fixture.window.webContents }, { requestId: fixture.menus()[0]![1].requestId, itemId: 'desktop.reveal-image' })
+    expect(imageActionMocks.revealContextMenuImage).toHaveBeenLastCalledWith('/existing/newer.png')
+  })
+
+  it('opens an embedded-browser image menu with its final rows on the first request', async () => {
+    const fixture = await imageMenuFixture()
+    let resolvePath!: (path: string) => void
+    imageActionMocks.findContextMenuImagePath.mockImplementationOnce(() => new Promise((resolve) => { resolvePath = resolve }))
+    fixture.browser.emit('context-menu', { ...fixture.params, srcURL: 'file:///existing/original.png' }, fixture.window.webContents, 'page')
+    expect(fixture.browser.openContextMenu).not.toHaveBeenCalled()
+    resolvePath('/existing/original.png')
+    await vi.waitFor(() => expect(fixture.browser.openContextMenu).toHaveBeenCalledTimes(1))
+    expect(fixture.browser.openContextMenu).toHaveBeenCalledWith(expect.objectContaining({
+      items: [
+        expect.objectContaining({ id: 'desktop.copy-image' }),
+        expect.objectContaining({ id: 'desktop.reveal-image' }),
+        expect.objectContaining({ id: 'desktop.save-image' }),
+      ],
+    }), 'page')
+    expect(fixture.browser.updateContextMenu).not.toHaveBeenCalled()
+  })
+
   it.each(['image-first', 'plugin-first'] as const)('keeps original-file and plugin actions when %s finishes', async (order) => {
     let resolvePath!: (path: string | undefined) => void
     let resolvePlugin!: (collection: unknown) => void
@@ -146,28 +239,32 @@ describe('image menu discovery and dispatch', () => {
     window.webContents.emit('context-menu', { preventDefault: vi.fn() }, params)
     const menus = () => window.webContents.send.mock.calls.filter(([channel]) => channel === 'desktop:context-menu')
     const plugin = { token: 'image-plugin-token', items: [{ kind: 'item', id: 'plugin.inspect', label: '检查', enabled: true }] }
-    const first = menus().at(-1)![1]
-    expect(first.items.map((item: { id: string }) => item.id)).toEqual(['desktop.copy-image', 'desktop.save-image'])
+    expect(menus()).toHaveLength(0)
     if (order === 'image-first') {
       resolvePath('/existing/original.png')
-      await vi.waitFor(() => expect(menus().at(-1)![1].items).toContainEqual(expect.objectContaining({ id: 'desktop.reveal-image' })))
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(menus()).toHaveLength(0)
       resolvePlugin(plugin)
     } else {
       resolvePlugin(plugin)
-      await vi.waitFor(() => expect(menus().at(-1)![1].items).toContainEqual(expect.objectContaining({ id: 'plugin.inspect' })))
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(menus()).toHaveLength(0)
       resolvePath('/existing/original.png')
     }
     await vi.waitFor(() => {
+      expect(menus()).toHaveLength(1)
       const ids = menus().at(-1)![1].items.map((item: { id: string }) => item.id)
       expect(ids).toContain('plugin.inspect')
       expect(ids.filter((id: string) => id === 'desktop.reveal-image')).toHaveLength(1)
     })
+    const first = menus()[0]![1]
     const select = electronMocks.ipcHandlers.get('desktop:context-menu-select')!
     await select({ sender: window.webContents }, { requestId: first.requestId, itemId: 'desktop.reveal-image' })
     expect(imageActionMocks.revealContextMenuImage).toHaveBeenCalledWith('/existing/original.png')
 
     // Memory-only images still dispatch an explicit save through the source frame.
     window.webContents.emit('context-menu', { preventDefault: vi.fn() }, params)
+    await vi.waitFor(() => expect(menus()).toHaveLength(2))
     const memory = menus().at(-1)![1]
     await select({ sender: window.webContents }, { requestId: memory.requestId, itemId: 'desktop.save-image' })
     expect(imageActionMocks.saveContextMenuImage).toHaveBeenCalledWith(expect.objectContaining({ frame, srcURL: params.srcURL }), window)

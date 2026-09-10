@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url'
 import { readFile } from 'node:fs/promises'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, nativeTheme, shell } from 'electron'
 import type { ContextMenuParams, WebContents, WebFrameMain } from 'electron'
-import type { BrowserDisplayMode, BrowserMenuKind, ColorTheme, DesktopApplicationMenuAction, DesktopBrowserMenuAnchor, DesktopBrowserNavigationAction, DesktopBrowserViewBounds, DesktopBrowserViewport, DesktopPlatform, DesktopState, DevelopmentPluginRequest, HarnessLifecycle, PluginActivationRequest, PluginInitializationFailure, PluginInstallRequest, PluginRemoveRequest, PluginUpdateRequest, TitleMenuAction, WindowAction } from '../shared/contracts.js'
+import type { BrowserDisplayMode, BrowserMenuKind, ColorTheme, DesktopApplicationMenuAction, DesktopBrowserMenuAnchor, DesktopBrowserNavigationAction, DesktopBrowserViewBounds, DesktopBrowserViewport, DesktopPlatform, DesktopState, DevelopmentPluginRequest, DfyPluginMutationRequest, HarnessLifecycle, PluginActivationRequest, PluginInitializationFailure, PluginInstallRequest, PluginRemoveRequest, PluginUpdateRequest, TitleMenuAction, WindowAction } from '../shared/contracts.js'
 import type { DesktopContextMenuActionRequest, DesktopContextMenuRequest, DesktopPointerInput, PluginContextMenuCollection } from '../shared/context-menu.js'
 import { DESKTOP_CONTEXT_MENU_TRANSPORT_KEY, parsePluginContextMenuCollection } from '../shared/context-menu.js'
 import { RUNTIME_PREPARATION_PROGRESS_EVENT, type HarnessRuntimeManager } from './harness-runtime.js'
@@ -30,6 +30,7 @@ const HARNESS_LOAD_READY_FALLBACK_MS = 3_000
 const HARNESS_RELEASES_URL = 'https://github.com/deepseek-ai/deepseek-harness/releases'
 const HARNESS_PLUGIN_DOCUMENTATION_URL = 'https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/cli'
 const MAX_CLIPBOARD_IMAGE_PIXELS = 100_000_000
+const IMAGE_MENU_LOOKUP_TIMEOUT_MS = 500
 
 type ColorThemePreference = ColorTheme | 'system'
 
@@ -428,6 +429,16 @@ export class WindowController {
       if (event.sender !== this.window?.webContents) return
       return this.plugins?.getInventory()
     })
+    ipcMain.handle('desktop:plugins-dfy-catalog', (event) => {
+      if (event.sender !== this.window?.webContents) return
+      if (this.plugins === undefined) throw new Error('插件管理服务尚未准备完成。')
+      return this.plugins.getDfyCatalog()
+    })
+    ipcMain.handle('desktop:plugins-dfy-mutate', (event, request: DfyPluginMutationRequest) => {
+      if (event.sender !== this.window?.webContents) return
+      if (this.plugins === undefined) throw new Error('插件管理服务尚未准备完成。')
+      return this.plugins.mutateDfyPlugins(request)
+    })
     ipcMain.handle('desktop:plugins-choose-local', (event) => {
       if (event.sender !== this.window?.webContents) return
       return this.plugins?.chooseLocalDirectory()
@@ -462,6 +473,11 @@ export class WindowController {
     ipcMain.handle('desktop:plugins-open-documentation', async (event) => {
       if (event.sender !== this.window?.webContents) return
       await shell.openExternal(HARNESS_PLUGIN_DOCUMENTATION_URL)
+    })
+    ipcMain.handle('desktop:plugins-open-dfy-repository', async (event, packageName: unknown) => {
+      if (event.sender !== this.window?.webContents) return
+      if (this.plugins === undefined) throw new Error('插件管理服务尚未准备完成。')
+      await shell.openExternal(this.plugins.getDfyRepositoryUrl(packageName))
     })
     ipcMain.handle('desktop:browser-panel-open', async (event, open: boolean) => {
       if (event.sender !== this.window?.webContents || typeof open !== 'boolean') return
@@ -621,9 +637,16 @@ export class WindowController {
         items: builtins,
         allowedItemIds: new Set(builtins.flatMap((entry) => entry.kind === 'item' && entry.enabled ? [entry.id] : [])),
       }
+      const pending = this.pendingContextMenu
+      if (pending.allowedItemIds.has('desktop.copy-image')) {
+        if (!await this.prepareImageContextMenu(pending, params, pluginCollectionPromise)) return
+        window.webContents.send(CONTEXT_MENU_CHANNEL, {
+          requestId, x: params.x, y: params.y, items: pending.items,
+        } satisfies DesktopContextMenuRequest)
+        return
+      }
       const request: DesktopContextMenuRequest = { requestId, x: params.x, y: params.y, items: builtins }
       window.webContents.send(CONTEXT_MENU_CHANNEL, request)
-      void this.updateImageRevealMenu(this.pendingContextMenu, params)
       void pluginCollectionPromise.then((pluginCollection) => {
         this.updateOpenContextMenuWithPlugins(sequence, requestId, frame, params, pluginCollection)
       })
@@ -669,7 +692,6 @@ export class WindowController {
       items,
     }
     window.webContents.send(CONTEXT_MENU_CHANNEL, request)
-    void this.updateImageRevealMenu(this.pendingContextMenu, params)
   }
 
   private updateOpenContextMenuWithPlugins(
@@ -678,6 +700,7 @@ export class WindowController {
     frame: WebFrameMain,
     params: ContextMenuParams,
     pluginCollection: PluginContextMenuCollection | undefined,
+    publish = true,
   ): void {
     if (pluginCollection === undefined) return
     const pending = this.pendingContextMenu
@@ -700,7 +723,7 @@ export class WindowController {
     pending.items = items
     pending.allowedItemIds = new Set(items.flatMap((entry) => entry.kind === 'item' && entry.enabled ? [entry.id] : []))
     pending.pluginToken = pluginCollection.token
-    this.window?.webContents.send(CONTEXT_MENU_CHANNEL, {
+    if (publish) this.window?.webContents.send(CONTEXT_MENU_CHANNEL, {
       requestId,
       x: pending.x,
       y: pending.y,
@@ -740,38 +763,80 @@ export class WindowController {
       items,
       allowedItemIds: new Set(items.flatMap((entry) => entry.kind === 'item' && entry.enabled ? [entry.id] : [])),
     }
-    const request: DesktopContextMenuRequest = { requestId, x: params.x, y: params.y, items }
     const pending = this.pendingContextMenu
+    if (pending.allowedItemIds.has('desktop.copy-image') && !await this.prepareImageContextMenu(pending, params)) return
+    const request: DesktopContextMenuRequest = { requestId, x: params.x, y: params.y, items: pending.items }
     if (await this.browser?.openContextMenu(request, source) !== true) {
       if (this.pendingContextMenu === pending) this.pendingContextMenu = undefined
-    } else if (this.pendingContextMenu === pending) {
-      void this.updateImageRevealMenu(pending, params, source)
     }
   }
 
-  private async updateImageRevealMenu(
+  private async prepareImageContextMenu(
     pending: PendingDesktopContextMenu,
     params: ContextMenuParams,
-    source?: 'floating' | 'page',
-  ): Promise<void> {
-    if (!pending.allowedItemIds.has('desktop.copy-image')) return
+    plugins: Promise<PluginContextMenuCollection | undefined> = Promise.resolve(undefined),
+  ): Promise<boolean> {
+    const documentUrl = pending.frame.url
+    const cancel = (): void => {
+      if (this.pendingContextMenu === pending) this.resetContextMenu()
+    }
+    const mouse = (_event: unknown, input: { type: string }): void => {
+      if (input.type === 'mouseDown') cancel()
+    }
+    const key = (_event: unknown, input: { type: string }): void => {
+      if (input.type === 'keyDown') cancel()
+    }
+    pending.contents.on('before-mouse-event', mouse)
+    pending.contents.on('before-input-event', key)
+    pending.contents.on('did-start-navigation', cancel)
+    pending.contents.on('destroyed', cancel)
+    try {
+      // Assemble image and plugin actions before the first paint, so discovering
+      // an original file cannot insert a row into an already visible menu.
+      const [path, pluginCollection] = await Promise.all([this.findImageRevealPath(pending), plugins])
+      if (this.pendingContextMenu !== pending || pending.contents.isDestroyed()
+        || pending.frame.isDestroyed() || pending.frame.url !== documentUrl) {
+        cancel()
+        if (pluginCollection !== undefined) void this.releasePluginContextMenu({
+          frame: pending.frame, pluginToken: pluginCollection.token,
+        }, false)
+        return false
+      }
+      if (path !== undefined) {
+        pending.imageRevealPath = path
+        const reveal = buildBuiltinContextMenuItems(params, { imageCanReveal: true })
+          .find((entry) => entry.kind === 'item' && entry.id === 'desktop.reveal-image')
+        if (reveal !== undefined) {
+          const copyIndex = pending.items.findIndex((entry) => entry.kind === 'item' && entry.id === 'desktop.copy-image')
+          pending.items = [...pending.items.slice(0, copyIndex + 1), reveal, ...pending.items.slice(copyIndex + 1)]
+          pending.allowedItemIds.add('desktop.reveal-image')
+        }
+      }
+      this.updateOpenContextMenuWithPlugins(this.contextMenuSequence, pending.requestId, pending.frame, params, pluginCollection, false)
+      return true
+    } finally {
+      pending.contents.off('before-mouse-event', mouse)
+      pending.contents.off('before-input-event', key)
+      pending.contents.off('did-start-navigation', cancel)
+      pending.contents.off('destroyed', cancel)
+    }
+  }
+
+  private async findImageRevealPath(pending: PendingDesktopContextMenu): Promise<string | undefined> {
     // Looking for an existing original must not download arbitrary web images on right-click.
     if (!/^file:/iu.test(pending.srcURL)) {
       if (!this.isHarnessFrame(pending.frame)) return
       if (/^https?:/iu.test(pending.srcURL) && this.safeOrigin(pending.srcURL) !== this.harnessOrigin) return
     }
-    const path = await findContextMenuImagePath(pending, this.runtime.harnessHome).catch(() => undefined)
-    if (path === undefined || this.pendingContextMenu !== pending || pending.frame.isDestroyed()) return
-    pending.imageRevealPath = path
-    const reveal = buildBuiltinContextMenuItems(params, { imageCanReveal: true })
-      .find((entry) => entry.kind === 'item' && entry.id === 'desktop.reveal-image')
-    if (reveal === undefined) return
-    const copyIndex = pending.items.findIndex((entry) => entry.kind === 'item' && entry.id === 'desktop.copy-image')
-    pending.items = [...pending.items.slice(0, copyIndex + 1), reveal, ...pending.items.slice(copyIndex + 1)]
-    pending.allowedItemIds.add('desktop.reveal-image')
-    const request: DesktopContextMenuRequest = { requestId: pending.requestId, x: pending.x, y: pending.y, items: pending.items }
-    if (source === undefined) this.window?.webContents.send(CONTEXT_MENU_CHANNEL, request)
-    else this.browser?.updateContextMenu(request)
+    let timer: NodeJS.Timeout | undefined
+    try {
+      return await Promise.race([
+        findContextMenuImagePath(pending, this.runtime.harnessHome).catch(() => undefined),
+        new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), IMAGE_MENU_LOOKUP_TIMEOUT_MS) }),
+      ])
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   private async collectPluginContextMenu(frame: WebFrameMain): Promise<PluginContextMenuCollection | undefined> {

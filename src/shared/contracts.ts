@@ -88,6 +88,27 @@ export interface PluginInstallRequest {
   source: string
 }
 
+export interface DfyPluginDefinition {
+  name: string
+  title: string
+  category: string
+  description: string
+  repository: string
+  note?: string
+}
+
+export interface DfyPluginCatalog {
+  plugins: DfyPluginDefinition[]
+  releases: Array<{ name: string; version?: string }>
+  error?: string
+}
+
+export interface DfyPluginMutationRequest {
+  profile: string
+  packageNames: string[]
+  action: 'install' | 'update'
+}
+
 export interface PluginRemoveRequest {
   profile: string
   packageName: string
@@ -290,6 +311,8 @@ export interface DesktopBridge {
   restoreRecoveredPlugin(entryId: string): Promise<void>
   runDevelopmentPlugin(request: DevelopmentPluginRequest): Promise<void>
   getPluginInventory(): Promise<PluginInventory>
+  getDfyPluginCatalog(): Promise<DfyPluginCatalog>
+  mutateDfyPlugins(request: DfyPluginMutationRequest): Promise<PluginMutationResult>
   chooseLocalPluginDirectory(): Promise<string | undefined>
   installPlugin(request: PluginInstallRequest): Promise<PluginMutationResult>
   updatePlugin(request: PluginUpdateRequest): Promise<PluginMutationResult>
@@ -297,6 +320,7 @@ export interface DesktopBridge {
   setPluginActive(request: PluginActivationRequest): Promise<PluginMutationResult>
   copyPluginText(text: string): Promise<void>
   openPluginDocumentation(): Promise<void>
+  openDfyPluginRepository(packageName: string): Promise<void>
   setBrowserPanelOpen(open: boolean): Promise<void>
   setBrowserDisplayMode(mode: BrowserDisplayMode): Promise<void>
   openBrowserMenu(kind: BrowserMenuKind, anchor: DesktopBrowserMenuAnchor): Promise<void>

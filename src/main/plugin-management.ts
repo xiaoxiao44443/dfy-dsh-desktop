@@ -2,7 +2,12 @@ import { access, readdir, readFile, writeFile } from 'node:fs/promises'
 import type { Dirent } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 import { dialog, type BrowserWindow } from 'electron'
+import { valid } from 'semver'
+import { DFY_PLUGINS, DFY_PLUGIN_CATALOG_URL, isDfyRegistrySource, parseDfyPluginCatalog } from '../shared/dfy-plugins.js'
 import type {
+  DfyPluginCatalog,
+  DfyPluginDefinition,
+  DfyPluginMutationRequest,
   ManagedPluginEntry,
   PluginActivationRequest,
   PluginInstallRequest,
@@ -39,10 +44,15 @@ interface PackageMetadata {
 export interface PluginManagementActions {
   getWindow(): BrowserWindow | undefined
   runPnpm(profile: string, args: string[]): Promise<HarnessCommandResult>
+  fetch?: typeof fetch
+  catalogFile?: string
 }
 
 export class PluginManagementService {
   private commandRunning = false
+  private dfyPlugins: DfyPluginDefinition[] = DFY_PLUGINS
+  private hasFetchedDfyDirectory = false
+  private dfyCatalogRequest: Promise<DfyPluginCatalog> | undefined
 
   constructor(
     private readonly harnessHome: string,
@@ -77,6 +87,85 @@ export class PluginManagementService {
     })
     if (result.canceled) return undefined
     return result.filePaths[0]
+  }
+
+  getDfyCatalog(): Promise<DfyPluginCatalog> {
+    if (this.dfyCatalogRequest === undefined) {
+      this.dfyCatalogRequest = this.fetchDfyCatalog().finally(() => { this.dfyCatalogRequest = undefined })
+    }
+    return this.dfyCatalogRequest
+  }
+
+  getDfyRepositoryUrl(packageName: unknown): string {
+    const entry = this.dfyPlugins.find((plugin) => plugin.name === packageName)
+    if (entry === undefined) throw new Error('插件不在当前 DFY 目录中，请刷新列表。')
+    return entry.repository
+  }
+
+  private async fetchDfyCatalog(): Promise<DfyPluginCatalog> {
+    const errors: string[] = []
+    try {
+      let directory: string
+      if (this.actions.catalogFile !== undefined) {
+        directory = await readFile(this.actions.catalogFile, 'utf8')
+      } else {
+        const response = await (this.actions.fetch ?? fetch)(DFY_PLUGIN_CATALOG_URL, { signal: AbortSignal.timeout(7_000), cache: 'no-cache' })
+        if (!response.ok) throw new Error('Catalog request failed')
+        directory = await response.text()
+      }
+      if (directory.length > 128_000) throw new Error('Catalog is too large')
+      this.dfyPlugins = parseDfyPluginCatalog(JSON.parse(directory))
+      this.hasFetchedDfyDirectory = true
+    } catch {
+      errors.push(this.hasFetchedDfyDirectory ? '插件目录暂时无法更新，正在显示上次读取的列表。' : '插件目录暂时无法获取，正在显示内置备用列表。')
+    }
+    const plugins = this.dfyPlugins
+    const releases = await Promise.all(plugins.map(async ({ name }) => {
+      try {
+        const response = await (this.actions.fetch ?? fetch)(`https://registry.npmjs.org/${encodeURIComponent(name)}/latest`, {
+          signal: AbortSignal.timeout(7_000),
+        })
+        if (!response.ok) throw new Error('Registry request failed')
+        const metadata = await response.json() as { name?: unknown; version?: unknown }
+        if (metadata.name !== name || typeof metadata.version !== 'string' || valid(metadata.version) === null) {
+          throw new Error('Invalid package metadata')
+        }
+        return { name, version: metadata.version }
+      } catch {
+        return { name }
+      }
+    }))
+    const failed = releases.filter((entry) => entry.version === undefined).length
+    if (failed > 0) errors.push(`${failed} 个插件的最新版本暂时无法获取，可重试。`)
+    return { plugins, releases, ...(errors.length > 0 ? { error: errors.join(' ') } : {}) }
+  }
+
+  async mutateDfyPlugins(request: DfyPluginMutationRequest): Promise<PluginMutationResult> {
+    if (request === null || typeof request !== 'object') throw new Error('DFY 插件操作无效。')
+    const profile = validateProfileName(request.profile)
+    if (request.action !== 'install' && request.action !== 'update') throw new Error('DFY 插件操作无效。')
+    const allowed = new Set(this.dfyPlugins.map(({ name }) => name))
+    if (!Array.isArray(request.packageNames) || request.packageNames.length === 0
+      || request.packageNames.length > allowed.size || request.packageNames.some((name) => !allowed.has(name))) {
+      throw new Error('请选择列表中的 DFY 插件。')
+    }
+    const names = [...new Set(request.packageNames)]
+    const args = request.action === 'install'
+      ? ['add', ...names.map((name) => `${name}@latest`), '--registry=https://registry.npmjs.org']
+      : ['update', ...names, '--latest', '--registry=https://registry.npmjs.org']
+    return await this.run(profile, args, async (before) => {
+      for (const name of names) {
+        const source = before.dependencies?.[name]
+        if (source !== undefined && !isDfyRegistrySource(source)) {
+          throw new Error(`“${name}”使用本地、Git 或其他来源，请在“已安装”中管理。`)
+        }
+        if (request.action === 'update' && source === undefined) throw new Error(`“${name}”尚未安装。`)
+        if (request.action === 'install' && source !== undefined
+          && await this.readPackageMetadata(join(this.harnessHome, 'profiles', profile), name, source) !== undefined) {
+          throw new Error(`“${name}”已经安装，请使用更新操作。`)
+        }
+      }
+    })
   }
 
   async install(request: PluginInstallRequest): Promise<PluginMutationResult> {
@@ -294,11 +383,12 @@ export class PluginManagementService {
     await this.writeManifest(path, manifest)
   }
 
-  private async run(profile: string, args: string[]): Promise<PluginMutationResult> {
+  private async run(profile: string, args: string[], validate?: (before: ProfileManifest) => Promise<void>): Promise<PluginMutationResult> {
     if (this.commandRunning) throw new Error('已有插件操作正在运行。')
     this.commandRunning = true
     try {
       const before = await this.readManifest(join(this.harnessHome, 'profiles', profile, 'package.json'))
+      await validate?.(before)
       const result = await this.actions.runPnpm(profile, args)
       if (result.exitCode === 0) {
         await this.reconcileInstalledBundles(profile, before)

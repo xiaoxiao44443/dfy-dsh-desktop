@@ -1,6 +1,8 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   DesktopBridge,
+  DfyPluginCatalog,
+  DfyPluginMutationRequest,
   BrowserDisplayMode,
   BrowserMenuKind,
   DesktopBrowserMenuAnchor,
@@ -46,6 +48,8 @@ const bridge: DesktopBridge = {
   restoreRecoveredPlugin: (entryId: string) => ipcRenderer.invoke('desktop:plugin-recovery-restore', entryId) as Promise<void>,
   runDevelopmentPlugin: (request: DevelopmentPluginRequest) => ipcRenderer.invoke('desktop:development-run-plugin', request) as Promise<void>,
   getPluginInventory: () => ipcRenderer.invoke('desktop:plugins-inventory') as Promise<PluginInventory>,
+  getDfyPluginCatalog: () => ipcRenderer.invoke('desktop:plugins-dfy-catalog') as Promise<DfyPluginCatalog>,
+  mutateDfyPlugins: (request: DfyPluginMutationRequest) => ipcRenderer.invoke('desktop:plugins-dfy-mutate', request) as Promise<PluginMutationResult>,
   chooseLocalPluginDirectory: () => ipcRenderer.invoke('desktop:plugins-choose-local') as Promise<string | undefined>,
   installPlugin: (request: PluginInstallRequest) => ipcRenderer.invoke('desktop:plugins-install', request) as Promise<PluginMutationResult>,
   updatePlugin: (request: PluginUpdateRequest) => ipcRenderer.invoke('desktop:plugins-update', request) as Promise<PluginMutationResult>,
@@ -53,6 +57,7 @@ const bridge: DesktopBridge = {
   setPluginActive: (request: PluginActivationRequest) => ipcRenderer.invoke('desktop:plugins-set-active', request) as Promise<PluginMutationResult>,
   copyPluginText: (text: string) => ipcRenderer.invoke('desktop:plugins-copy-text', text) as Promise<void>,
   openPluginDocumentation: () => ipcRenderer.invoke('desktop:plugins-open-documentation') as Promise<void>,
+  openDfyPluginRepository: (packageName: string) => ipcRenderer.invoke('desktop:plugins-open-dfy-repository', packageName) as Promise<void>,
   setBrowserPanelOpen: (open: boolean) => ipcRenderer.invoke('desktop:browser-panel-open', open) as Promise<void>,
   setBrowserDisplayMode: (mode: BrowserDisplayMode) => ipcRenderer.invoke('desktop:browser-display-mode', mode) as Promise<void>,
   openBrowserMenu: (kind: BrowserMenuKind, anchor: DesktopBrowserMenuAnchor) => ipcRenderer.invoke('desktop:browser-open-menu', kind, anchor) as Promise<void>,

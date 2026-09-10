@@ -18,6 +18,7 @@ import { PluginManagementService } from './plugin-management.js'
 import { DesktopRendererHost } from './desktop-renderer-host.js'
 import { DesktopUpdateService } from './desktop-update.js'
 import { SessionFormatCompatibilityError } from './session-format-compat.js'
+import { DesktopTray } from './desktop-tray.js'
 
 // Chromium may not propagate macOS' dark color-scheme media query into the
 // cross-origin Harness iframe. Preserve explicit Harness light/dark choices,
@@ -92,11 +93,20 @@ if (!app.requestSingleInstanceLock()) {
   let browser: DesktopBrowserService | undefined
   let rendererHost: DesktopRendererHost | undefined
   let desktopUpdates: DesktopUpdateService | undefined
+  let tray: DesktopTray | undefined
   let quitting = false
 
-  app.on('second-instance', () => windows?.focus())
+  const showMainWindow = async (): Promise<void> => {
+    if (quitting) return
+    await windows?.create()
+    const window = windows?.getBrowserWindow()
+    if (window !== undefined) tray?.attachWindow(window)
+  }
+  const reopen = (): void => { void showMainWindow().catch((error) => debugError('[desktop] reopen failed', error)) }
+  app.on('second-instance', reopen)
   app.on('before-quit', () => {
     quitting = true
+    tray?.dispose()
     runtime?.stopAutomaticChecks()
     desktopUpdates?.stopAutomaticChecks()
     void harness?.stop()
@@ -104,8 +114,8 @@ if (!app.requestSingleInstanceLock()) {
     void desktopBridge?.stop()
     void rendererHost?.stop()
   })
-  app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })
-  app.on('activate', () => { if (!quitting) void windows?.create() })
+  app.on('window-all-closed', () => { if (process.platform !== 'darwin' && !tray?.isActive) app.quit() })
+  app.on('activate', reopen)
 
   const bootstrap = async (): Promise<void> => {
     debugLog('[desktop] waiting for Electron ready')
@@ -217,6 +227,7 @@ if (!app.requestSingleInstanceLock()) {
     }
     const pluginManagement = new PluginManagementService(runtime.harnessHome, {
       getWindow: () => windows?.getBrowserWindow(),
+      ...(!app.isPackaged && process.env.DFY_PLUGIN_CATALOG_FILE ? { catalogFile: process.env.DFY_PLUGIN_CATALOG_FILE } : {}),
       runPnpm: async (profile, args) => {
         if (harness === undefined) throw new Error('Harness 尚未启动。')
         return await harness.runPnpm(profile, args)
@@ -243,6 +254,25 @@ if (!app.requestSingleInstanceLock()) {
     )
     windows.setRuntimePreparing()
     await windows.create()
+    tray = new DesktopTray({
+      platform: process.platform,
+      iconsRoot: app.isPackaged ? join(process.resourcesPath, 'tray') : join(app.getAppPath(), 'resources', 'tray'),
+      version: app.getVersion(),
+      settingsPath: join(app.getPath('userData'), 'tray-settings.json'),
+      showWindow: showMainWindow,
+      quit: () => app.quit(),
+      onError: (error) => {
+        debugError('[desktop] tray action failed', error)
+        dialog.showErrorBox('托盘操作失败', error instanceof Error ? error.message : String(error))
+      },
+    })
+    try {
+      tray.start()
+      const window = windows.getBrowserWindow()
+      if (window !== undefined) tray.attachWindow(window)
+    } catch (error) {
+      debugError('[desktop] tray unavailable', error)
+    }
     desktopUpdates.scheduleAutomaticChecks()
     debugLog('[desktop] startup window created; resolving Harness runtime')
     await runtime.initialize()

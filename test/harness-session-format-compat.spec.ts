@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { execFile } from 'node:child_process'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
+import { pathToFileURL } from 'node:url'
 
 let root: string
 let assertDfyHistoryBlock: (value: unknown) => boolean
@@ -26,6 +27,33 @@ const generated = { type: 'dfy-session-image', version: 1, ref: 'session-image-r
 } }
 
 describe('DFY historical content admission', () => {
+  it.each(['0.1.5-alpha.1', '0.1.5-alpha.2', '0.1.5-rc.1'])('installs the admission hook for audited runtime %s', async (version) => {
+    const moduleRoot = join(root, version, 'node_modules', '@deepseek-ai', 'dsh-session-format-v2-to-v3')
+    const entry = join(moduleRoot, 'lib', 'index.js')
+    await mkdir(dirname(entry), { recursive: true })
+    await writeFile(join(moduleRoot, 'package.json'), JSON.stringify({ type: 'module', version }))
+    await writeFile(entry, `const CONTENT_KINDS = new Set(["text"]);
+function record(value) { return value; }
+function assertContentBlock(value, label) {
+\tconst block = record(value, label);
+  if (!CONTENT_KINDS.has(block.type)) throw new Error('unknown content');
+}
+export { assertContentBlock };
+`)
+    const script = `
+      const assert = require('node:assert/strict');
+      require(${JSON.stringify(join(root, 'harness-session-format-compat.cjs'))}).registerDfySessionFormatCompatibility();
+      (async () => {
+        const { assertContentBlock } = await import(${JSON.stringify(pathToFileURL(entry).href)});
+        assertContentBlock(${JSON.stringify(media)}, 'fixture');
+        assertContentBlock(${JSON.stringify(generated)}, 'fixture');
+        assert.throws(() => assertContentBlock({ ...${JSON.stringify(media)}, sourceSeq: 1 }, 'fixture'), /unsupported fields/);
+        assert.throws(() => assertContentBlock({ type: 'unknown-plugin' }, 'fixture'), /unknown content/);
+      })().catch(error => { console.error(error); process.exitCode = 1; });
+    `
+    await expect(promisify(execFile)(process.execPath, ['-e', script])).resolves.toBeDefined()
+  })
+
   it.each([media, generated])('preserves the released $type block without dropping references', (block) => {
     const before = structuredClone(block)
     expect(assertDfyHistoryBlock(block)).toBe(true)

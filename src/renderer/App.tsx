@@ -2,12 +2,14 @@ import { ArrowLeft, ArrowRight, Check, ChevronDown, Code2, Columns2, Copy, Downl
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent, ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import type { BrowserDisplayMode, DesktopApplicationMenuAction, DesktopBrowserHistoryEntry, DesktopBrowserShellSnapshot, DesktopBrowserViewport, DesktopState, DevelopmentState, ManagedPluginEntry, PluginInventory, PluginMutationResult, PluginRecoveryEntry, PluginSourceType } from '../shared/contracts.js'
+import type { BrowserDisplayMode, DesktopApplicationMenuAction, DesktopBrowserHistoryEntry, DesktopBrowserShellSnapshot, DesktopBrowserViewport, DesktopState, DevelopmentState, DfyPluginCatalog as DfyCatalog, ManagedPluginEntry, PluginInventory, PluginMutationResult, PluginRecoveryEntry, PluginSourceType } from '../shared/contracts.js'
 import type { ContextMenuEntry, DesktopContextMenuRequest } from '../shared/context-menu.js'
 import { gitRepositoryWebUrl } from '../shared/plugin-source.js'
 import { BrowserAddressInput } from './BrowserAddressInput.js'
 import { AgentPointerIcon } from './AgentPointerIcon.js'
 import { ContextMenu } from './ContextMenu.js'
+import { DfyPluginCatalog } from './DfyPluginCatalog.js'
+import { DFY_PLUGINS } from '../shared/dfy-plugins.js'
 import appIconUrl from '../../app-icon.png'
 import titlebarIconUrl from '../../titlebar-icon.png'
 
@@ -526,7 +528,7 @@ function pluginSourceCopyValue(plugin: ManagedPluginEntry): string {
   return plugin.sourceType === 'npm' ? `${plugin.name}@${plugin.source}` : plugin.source
 }
 
-function PluginManager({
+export function PluginManager({
   open,
   harnessReady,
   restarting,
@@ -538,6 +540,11 @@ function PluginManager({
   onClose: () => void
 }): ReactNode {
   const [inventory, setInventory] = useState<PluginInventory>()
+  const [dfyCatalog, setDfyCatalog] = useState<DfyCatalog>()
+  const [catalogLoading, setCatalogLoading] = useState(false)
+  const catalogExpiresAt = useRef(0)
+  const catalogRequest = useRef<Promise<void> | undefined>(undefined)
+  const [pluginTab, setPluginTab] = useState<'installed' | 'dfy'>('installed')
   const [selectedProfile, setSelectedProfile] = useState('')
   const [query, setQuery] = useState('')
   const [source, setSource] = useState('')
@@ -568,11 +575,42 @@ function PluginManager({
     }
   }, [])
 
+  const loadDfyCatalog = useCallback((force = false): Promise<void> => {
+    if (catalogRequest.current !== undefined) return catalogRequest.current
+    if (!force && Date.now() < catalogExpiresAt.current) return Promise.resolve()
+    setCatalogLoading(true)
+    // Reuse in-flight queries and cached metadata across tabs, profiles and dialog opens.
+    catalogRequest.current = Promise.resolve().then(() => desktopApi.getDfyPluginCatalog())
+      .then((next) => {
+        setDfyCatalog(next)
+        catalogExpiresAt.current = Date.now() + (next.error ? 30_000 : 5 * 60_000)
+      })
+      .catch(() => {
+        setDfyCatalog((previous) => ({ plugins: previous?.plugins ?? DFY_PLUGINS, releases: previous?.releases ?? [], error: '插件目录暂时无法更新，可重试。' }))
+        catalogExpiresAt.current = Date.now() + 30_000
+      })
+      .finally(() => {
+        setCatalogLoading(false)
+        catalogRequest.current = undefined
+      })
+    return catalogRequest.current
+  }, [])
+
+  const refreshPlugins = async (): Promise<void> => {
+    if (loading || catalogLoading || operating) return
+    await Promise.all([loadInventory(), ...(pluginTab === 'dfy' ? [loadDfyCatalog(true)] : [])])
+  }
+
   useEffect(() => {
     if (!open) return
     closeButton.current?.focus({ preventScroll: true })
     void loadInventory()
   }, [loadInventory, open])
+
+  useEffect(() => {
+    if (!open || pluginTab !== 'dfy') return
+    void loadDfyCatalog()
+  }, [loadDfyCatalog, open, pluginTab])
 
   useEffect(() => {
     setRemoveConfirmation(undefined)
@@ -778,18 +816,24 @@ function PluginManager({
         <div className="plugin-toolbar">
           <label className="plugin-profile-select"><span>Profile</span><select value={selectedProfile} disabled={loading || operating} onChange={(event) => setSelectedProfile(event.target.value)}>{inventory?.profiles.map((profile) => <option value={profile.name} key={profile.name}>{profile.name}</option>)}</select></label>
           <div className="plugin-summary"><span><strong>{managedPlugins.length}</strong> 个自定义插件</span><span><strong>{localCount}</strong> 个本地</span>{missingCount > 0 ? <span className="error"><strong>{missingCount}</strong> 个异常</span> : null}</div>
-          <button className="plugin-icon-button" type="button" aria-label="刷新插件列表" title="刷新" disabled={loading || operating} onClick={() => void loadInventory()}><RotateCw className={loading ? 'spinning' : ''} /></button>
+          <button className="plugin-icon-button" type="button" aria-label="刷新插件列表" title={pluginTab === 'dfy' ? '刷新安装状态和 DFY 版本' : '刷新插件列表'} disabled={loading || catalogLoading || operating} onClick={() => void refreshPlugins()}><RotateCw className={loading || catalogLoading ? 'spinning' : ''} /></button>
         </div>
 
-        <section className="plugin-install-card">
+        <nav className="plugin-tabs" aria-label="插件列表类型">
+          <button type="button" aria-pressed={pluginTab === 'installed'} onClick={() => { setPluginTab('installed'); setQuery(''); setPluginContextMenu(undefined) }}>已安装</button>
+          <button type="button" aria-pressed={pluginTab === 'dfy'} onClick={() => { setPluginTab('dfy'); setQuery(''); setPluginContextMenu(undefined) }}>DFY 插件</button>
+        </nav>
+
+        {pluginTab === 'installed' ? <section className="plugin-install-card">
           <div><strong>添加插件</strong><span>支持 npm 包名、Git 仓库地址和本地目录</span></div>
           <div className="plugin-install-fields">
             <input value={source} type="text" autoComplete="off" spellCheck="false" placeholder="例如 @scope/plugin 或 https://github.com/…" disabled={operating} onChange={(event) => setSource(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void install() }} />
             <button className="compact-button plugin-folder-button" type="button" disabled={operating} onClick={() => void chooseLocal()}><FolderOpen /><span>本地目录</span></button>
             <button className="dialog-button primary plugin-install-button" type="button" disabled={operating || !harnessReady || selectedProfile.length === 0 || source.trim().length === 0} onClick={() => void install()}><Plus />{installing ? '处理中…' : '添加'}</button>
           </div>
-          {!harnessReady ? <p className="plugin-inline-note">Harness 就绪后可安装或移除；当前仍可查看已有插件。</p> : null}
-        </section>
+        </section> : null}
+
+        {!harnessReady ? <p className="plugin-inline-note">Harness 就绪后可安装、更新或移除插件；当前仍可浏览列表。</p> : null}
 
         {error ? <p className="plugin-error">{error}</p> : null}
         {lastResult ? <details className={`plugin-command-result${lastResult.exitCode === 0 ? '' : ' error'}`}><summary>{lastResult.exitCode === 0 ? '命令执行完成' : '查看失败输出'}<code>{lastResult.command}</code></summary><pre>{lastResult.output}</pre></details> : null}
@@ -798,15 +842,29 @@ function PluginManager({
           <div className="plugin-restart-slot">
             {restartRequired ? <div className="plugin-restart-inline"><span>配置待重启生效</span><button type="button" disabled={operating || restarting} onClick={() => void restart()}>{restarting ? '正在重启…' : '立即重启'}</button></div> : null}
           </div>
-          <div className="plugin-search"><Search aria-hidden="true" /><input value={query} type="search" placeholder="搜索名称、说明或来源" onChange={(event) => setQuery(event.target.value)} /></div>
+          <div className="plugin-search"><Search aria-hidden="true" /><input value={query} type="search" placeholder={pluginTab === 'dfy' ? '搜索 DFY 插件' : '搜索名称、说明或来源'} onChange={(event) => setQuery(event.target.value)} /></div>
         </div>
 
-        <div className="plugin-list" aria-busy={loading}>
+        <div className={`plugin-list${pluginTab === 'dfy' ? ' dfy-plugin-list' : ''}`} aria-busy={loading || catalogLoading}>
           {loading && inventory === undefined ? <div className="plugin-empty">正在读取 Profile…</div> : null}
           {!loading && inventory?.profiles.length === 0 ? <div className="plugin-empty">尚未发现已初始化的 Profile。</div> : null}
           {activeProfile?.error ? <div className="plugin-empty error">{activeProfile.error}</div> : null}
-          {activeProfile !== undefined && !activeProfile.error && matchingPlugins.length === 0 ? <div className="plugin-empty">{query.trim() ? '没有匹配的插件。' : '这个 Profile 还没有安装自定义插件。'}</div> : null}
-          {matchingPlugins.length > 0 ? <section className="plugin-group"><header><span>自定义插件</span><span>{matchingPlugins.length}</span></header><div>{matchingPlugins.map(renderPlugin)}</div></section> : null}
+          {pluginTab === 'installed' && activeProfile !== undefined && !activeProfile.error && matchingPlugins.length === 0 ? <div className="plugin-empty">{query.trim() ? '没有匹配的插件。' : '这个 Profile 还没有安装自定义插件。'}</div> : null}
+          {pluginTab === 'installed' && matchingPlugins.length > 0 ? <section className="plugin-group"><header><span>自定义插件</span><span>{matchingPlugins.length}</span></header><div>{matchingPlugins.map(renderPlugin)}</div></section> : null}
+          {pluginTab === 'dfy' ? <DfyPluginCatalog
+            key={selectedProfile}
+            plugins={managedPlugins}
+            query={query}
+            disabled={operating || loading || restarting || !harnessReady || activeProfile === undefined || activeProfile.error !== undefined}
+            catalog={dfyCatalog}
+            loading={catalogLoading}
+            onReload={() => void loadDfyCatalog(true)}
+            onOpenRepository={(packageName) => {
+              void desktopApi.openDfyPluginRepository(packageName).catch((nextError: unknown) => setError(nextError instanceof Error ? nextError.message : String(nextError)))
+            }}
+            onMutate={(action, packageNames) => runMutation(() => desktopApi.mutateDfyPlugins({ profile: selectedProfile, action, packageNames }))}
+            onManage={(packageName) => { setPluginTab('installed'); setQuery(packageName) }}
+          /> : null}
         </div>
       </div>
 
