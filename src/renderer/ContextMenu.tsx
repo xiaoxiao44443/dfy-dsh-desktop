@@ -17,6 +17,7 @@ import {
   Scissors,
   Settings,
   Sparkles,
+  SquareMousePointer,
   Terminal,
   Trash2,
 } from 'lucide-react'
@@ -33,6 +34,7 @@ const menuIcons: Record<ContextMenuIcon, LucideIcon> = {
   undo: RotateCcw,
   redo: RotateCw,
   'select-all': MousePointer2,
+  inspect: SquareMousePointer,
   'external-link': ExternalLink,
   browser: PanelRightOpen,
   link: Link,

@@ -29,6 +29,14 @@ export interface BrowserScreenshotMetadata {
   rect?: CssScreenshotRect
   scrollX: number
   scrollY: number
+  viewportWidth?: number
+  viewportHeight?: number
+  coordinateMapping?: {
+    originX: number
+    originY: number
+    cssPixelsPerImagePixelX: number
+    cssPixelsPerImagePixelY: number
+  }
 }
 
 export interface BrowserScreenshotResource extends BrowserScreenshotMetadata {

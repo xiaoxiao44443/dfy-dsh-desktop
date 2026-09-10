@@ -1,5 +1,7 @@
 import { createRequire } from 'node:module'
+import { readFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
+import { runInNewContext } from 'node:vm'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 const originalWindow = globalThis.window
@@ -39,6 +41,53 @@ async function loadClientModule(overrides: Record<string, unknown> = {}): Promis
     if (id === 'react') return {}
     if (id === '@deepseek-ai/dsh-client-ui-primitives') return {}
     throw new Error(`Unexpected client dependency: ${id}`)
+  })
+}
+
+function observable<T>(initial: T) {
+  let value = initial
+  const listeners = new Set<() => void>()
+  return {
+    listeners,
+    getSnapshot: () => value,
+    subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
+    set(next: T) { value = next; for (const listener of [...listeners]) listener() },
+  }
+}
+
+function notificationContext(modern = true) {
+  const list = observable({ byId: { one: { displayTitle: '测试对话', running: true, updatedAt: 1 } } } as { byId: Record<string, Record<string, unknown>> })
+  const interactions = observable(new Map<string, Record<string, unknown>>())
+  const session = observable<Record<string, unknown>>({ nodes: [] })
+  const cleanups: Array<() => void> = []
+  const ctx = {
+    sessions: { list, binding: () => ({ session }) },
+    effect(setup: () => () => void) { const cleanup = setup(); cleanups.push(cleanup); return cleanup },
+    inject: vi.fn((_dependencies: string[], callback: (ctx: unknown) => void) => {
+      if (modern) callback({ ...ctx, uiSession: { pendingInteractions: interactions } })
+    }),
+  }
+  return { ctx, list, interactions, session, dispose: () => { for (const cleanup of cleanups.splice(0)) cleanup() } }
+}
+
+type NotificationApproval = { token: string; interactionKey: string }
+type ApprovalTransport = { answer(request: unknown): Promise<'answered' | 'expired'> }
+
+function approvalTransport(client: Record<string, unknown>): ApprovalTransport | undefined {
+  return Reflect.get(window, Symbol.for(String(client.NOTIFICATION_APPROVAL_TRANSPORT_KEY))) as ApprovalTransport | undefined
+}
+
+function loadOfficialApprovalClient(): { apply(ctx: unknown): void } {
+  const dshRequire = createRequire(createRequire(import.meta.url).resolve('@deepseek-ai/dsh/package.json'))
+  const packageUrl = pathToFileURL(dshRequire.resolve('@deepseek-ai/dsh-client-ui-approval/package.json'))
+  let factory: ((require: (id: string) => unknown) => { apply(ctx: unknown): void }) | undefined
+  runInNewContext(readFileSync(new URL('lib/client.js', packageUrl), 'utf8'), {
+    window: { __ModuleLoader__: { load: (entry: { factory: typeof factory }) => { factory = entry.factory } } },
+  })
+  if (factory === undefined) throw new Error('Official approval bundle did not register')
+  return factory((id) => {
+    if (id === 'react' || id === 'react/jsx-runtime' || id === '@deepseek-ai/dsh-client-ui-primitives') return {}
+    throw new Error(`Unexpected approval dependency: ${id}`)
   })
 }
 
@@ -316,5 +365,269 @@ describe('desktop notification session transitions', () => {
       sessionTitle: '新对话',
       key: 'question:newSession:2',
     }])
+  })
+
+  it('notifies from the rc.1 interaction store without list changes and distinguishes consecutive approval keys', async () => {
+    const client = await loadClientModule()
+    const install = client.installSessionNotifications as (ctx: unknown, send: (value: unknown) => Promise<void>) => void
+    const source = notificationContext()
+    const send = vi.fn(async (_value: unknown) => {})
+    install(source.ctx, send)
+    const approval = { key: 'approval:1', kind: 'approval', sessionId: 'one', toolName: 'desktop_restart_harness', reason: '加载浏览器修复' }
+    source.interactions.set(new Map([['one', approval]]))
+    source.interactions.set(new Map([['one', { ...approval }]]))
+    source.list.set({ byId: { one: { displayTitle: '已改标题', running: true, updatedAt: 2, pendingInteraction: 'approval' } } })
+    source.interactions.set(new Map([['one', { ...approval, key: 'approval:2', reason: '加载通知修复' }]]))
+    expect(send.mock.calls.map(([value]) => value)).toEqual([
+      { kind: 'approval', sessionId: 'one', sessionTitle: '测试对话', key: 'approval:one:approval:1', summary: 'desktop_restart_harness：加载浏览器修复' },
+      { kind: 'approval', sessionId: 'one', sessionTitle: '已改标题', key: 'approval:one:approval:2', summary: 'desktop_restart_harness：加载通知修复' },
+    ])
+    source.dispose()
+    expect(source.list.listeners.size).toBe(0)
+    expect(source.interactions.listeners.size).toBe(0)
+  })
+
+  it('summarizes rc.1 question and plan-review objects without legacy payload wrappers', async () => {
+    const client = await loadClientModule()
+    const install = client.installSessionNotifications as (ctx: unknown, send: (value: unknown) => Promise<void>) => void
+    const source = notificationContext()
+    const send = vi.fn(async (_value: unknown) => {})
+    install(source.ctx, send)
+    source.interactions.set(new Map([['one', { key: 'question:1', kind: 'question', sessionId: 'one', questions: [{ header: '尺寸', question: '选择哪种尺寸？' }] }]]))
+    source.interactions.set(new Map([['one', { key: 'question:2', kind: 'plan-review', sessionId: 'one', questions: [{ question: '请审核实施计划', detail: '详细计划', intent: { kind: 'plan-review' } }] }]]))
+    expect(send.mock.calls.map(([value]) => value)).toMatchObject([
+      { kind: 'question', summary: '选择哪种尺寸？' },
+      { kind: 'plan-review', summary: '请审核实施计划' },
+    ])
+    source.dispose()
+  })
+
+  it('rechecks independently published interactions before sending a completion and still completes the selected session', async () => {
+    const client = await loadClientModule()
+    const install = client.installSessionNotifications as (ctx: unknown, send: (value: unknown) => Promise<void>) => void
+    const source = notificationContext()
+    const send = vi.fn(async (_value: unknown) => {})
+    install(source.ctx, send)
+    source.list.set({ byId: { one: { displayTitle: '测试对话', running: false, updatedAt: 2 } } })
+    source.interactions.set(new Map([['one', { key: 'approval:1', kind: 'approval', sessionId: 'one', toolName: 'Bash' }]]))
+    source.session.set({ nodes: [{ kind: 'assistant', seq: 1, blocks: [{ kind: 'text', text: '请求确认' }] }] })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(send.mock.calls[0]?.[0]).toMatchObject({ kind: 'approval' })
+    source.interactions.set(new Map())
+    source.list.set({ byId: { one: { displayTitle: '测试对话', running: true, updatedAt: 3 } } })
+    source.session.set({ nodes: [{ kind: 'assistant', seq: 2, blocks: [{ kind: 'text', text: '任务已完成' }] }] })
+    // The selected session has no `completed` unread-dot field in rc.1.
+    source.list.set({ byId: { one: { displayTitle: '测试对话', running: false, updatedAt: 4 } } })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(send.mock.calls.map(([value]) => value)).toMatchObject([
+      { kind: 'approval' }, { kind: 'turn-complete', summary: '任务已完成' },
+    ])
+    source.dispose()
+  })
+
+  it('keeps legacy approval notifications when the newer UI service is absent', async () => {
+    const client = await loadClientModule()
+    const install = client.installSessionNotifications as (ctx: unknown, send: (value: unknown) => Promise<void>) => void
+    const source = notificationContext(false)
+    const send = vi.fn(async (_value: unknown) => {})
+    install(source.ctx, send)
+    source.session.set({ pending: [{ kind: 'approval', payload: { toolName: 'Bash', reason: '运行测试' } }] })
+    source.list.set({ byId: { one: { displayTitle: '测试对话', running: false, pendingInteraction: 'approval', updatedAt: 2 } } })
+    await Promise.resolve()
+    expect(send).toHaveBeenCalledWith({ kind: 'approval', sessionId: 'one', sessionTitle: '测试对话', key: 'approval:one:2', summary: 'Bash：运行测试' })
+    expect(source.interactions.listeners.size).toBe(0)
+    source.dispose()
+  })
+
+  it('drops a delayed completion after a newer run and cancels summary subscriptions on disposal', async () => {
+    const client = await loadClientModule()
+    const install = client.installSessionNotifications as (ctx: unknown, send: (value: unknown) => Promise<void>) => void
+    const source = notificationContext()
+    const send = vi.fn(async (_value: unknown) => {})
+    install(source.ctx, send)
+    source.list.set({ byId: { one: { displayTitle: '测试对话', running: false, updatedAt: 2 } } })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(source.session.listeners.size).toBe(1)
+    source.list.set({ byId: { one: { displayTitle: '测试对话', running: true, updatedAt: 3 } } })
+    source.session.set({ nodes: [{ kind: 'assistant', seq: 2, blocks: [{ kind: 'text', text: '新轮次回复' }] }] })
+    source.list.set({ byId: { one: { displayTitle: '测试对话', running: false, updatedAt: 4 } } })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(send.mock.calls[0]?.[0]).toMatchObject({ kind: 'turn-complete', key: 'turn-complete:one:4', summary: '新轮次回复' })
+    source.list.set({ byId: { one: { displayTitle: '测试对话', running: true, updatedAt: 5 } } })
+    source.list.set({ byId: { one: { displayTitle: '测试对话', running: false, updatedAt: 6 } } })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(source.session.listeners.size).toBe(1)
+    source.dispose()
+    expect(source.session.listeners.size).toBe(0)
+    await Promise.resolve()
+    expect(send).toHaveBeenCalledTimes(1)
+  })
+
+  it('attaches a later UI service through real Cordis optional injection and disposes both subscriptions', async () => {
+    const projectRequire = createRequire(import.meta.url)
+    const dshRequire = createRequire(projectRequire.resolve('@deepseek-ai/dsh/package.json'))
+    type TestContext = {
+      fiber: { dispose(): Promise<void> }
+      plugin(plugin: unknown): Promise<{ dispose(): Promise<void> }>
+    }
+    const cordis = await import(pathToFileURL(dshRequire.resolve('@deepseek-ai/cordis')).href) as {
+      Context: new () => TestContext
+      Service: new (ctx: TestContext, name: string) => object
+    }
+    const client = await loadClientModule()
+    const install = client.installSessionNotifications as (ctx: unknown, send: (value: unknown) => Promise<void>) => void
+    const source = notificationContext()
+    const send = vi.fn(async (_value: unknown) => {})
+    const root = new cordis.Context()
+    class Sessions extends cordis.Service {
+      list = source.list
+      binding = source.ctx.sessions.binding
+      constructor(ctx: TestContext) { super(ctx, 'sessions') }
+    }
+    class UiSession extends cordis.Service {
+      pendingInteractions = source.interactions
+      constructor(ctx: TestContext) { super(ctx, 'uiSession') }
+    }
+    try {
+      await root.plugin(Sessions)
+      const consumer = await root.plugin(Object.assign((ctx: TestContext) => install(ctx, send), { inject: ['sessions'] }))
+      expect(source.list.listeners.size).toBe(1)
+      expect(source.interactions.listeners.size).toBe(0)
+      const ui = await root.plugin(UiSession)
+      expect(source.interactions.listeners.size).toBe(1)
+      source.interactions.set(new Map([['one', { key: 'approval:1', kind: 'approval', sessionId: 'one', toolName: 'Bash' }]]))
+      expect(send).toHaveBeenCalledWith(expect.objectContaining({ kind: 'approval', summary: '请求使用 Bash' }))
+      await ui.dispose()
+      expect(source.interactions.listeners.size).toBe(0)
+      expect(source.list.listeners.size).toBe(1)
+      await consumer.dispose()
+      expect(source.list.listeners.size).toBe(0)
+    } finally {
+      await root.fiber.dispose()
+    }
+  })
+
+  it.each(['allowed-once', 'rejected'] as const)('answers the real rc.1 PendingApproval once with %s', async (decision) => {
+    const client = await loadClientModule()
+    const install = client.installSessionNotifications as (ctx: unknown, send: (value: unknown) => Promise<void>) => void
+    const source = notificationContext()
+    const send = vi.fn(async (_value: unknown) => {})
+    install(source.ctx, send)
+    let requestApproval: ((request: Record<string, unknown>, next: () => Promise<string>) => Promise<string>) | undefined
+    loadOfficialApprovalClient().apply({
+      effect: (setup: () => unknown) => setup(),
+      locale: { register: () => () => {} },
+      slots: { inject: () => {} },
+      sessions: { scopeOf: () => 'one' },
+      remote: { $on: (_name: string, handler: typeof requestApproval) => { requestApproval = handler } },
+      uiSession: { registerPendingInteraction: () => (pending: Record<string, unknown>) => {
+        source.interactions.set(new Map([['one', pending]]))
+        return () => { source.interactions.set(new Map()) }
+      } },
+    })
+    if (requestApproval === undefined) throw new Error('Official approval handler did not register')
+    const outcome = requestApproval({ toolName: 'desktop_restart_harness', reason: '加载已更新插件' }, async () => 'delegated')
+    const notification = send.mock.calls[0]?.[0] as { approval: NotificationApproval }
+    expect(notification.approval).toEqual({ token: expect.stringMatching(/^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/u), interactionKey: 'approval:1' })
+    const transport = approvalTransport(client)!
+    const command = { sessionId: 'one', ...notification.approval, decision }
+    await expect(Promise.all([transport.answer(command), transport.answer(command)])).resolves.toEqual(['answered', 'expired'])
+    await expect(outcome).resolves.toBe(decision)
+    expect(source.interactions.getSnapshot().size).toBe(0)
+    source.dispose()
+    expect(approvalTransport(client)).toBeUndefined()
+  })
+
+  it('expires replaced objects and removed requests without ever answering the new approval', async () => {
+    const client = await loadClientModule()
+    const install = client.installSessionNotifications as (ctx: unknown, send: (value: unknown) => Promise<void>) => void
+    const source = notificationContext()
+    const send = vi.fn(async (_value: unknown) => {})
+    install(source.ctx, send)
+    const first = { key: 'approval:1', kind: 'approval', sessionId: 'one', answer: vi.fn(async () => {}) }
+    source.interactions.set(new Map([['one', first]]))
+    const initial = (send.mock.calls[0]?.[0] as { approval: NotificationApproval }).approval
+    const replacement = { ...first, answer: vi.fn(async () => {}) }
+    // Deliberately omit a store notification: the native click must re-read the actual object.
+    source.interactions.getSnapshot().set('one', replacement)
+    await expect(approvalTransport(client)!.answer({ sessionId: 'one', ...initial, decision: 'allowed-once' })).resolves.toBe('expired')
+    expect(first.answer).not.toHaveBeenCalled()
+    expect(replacement.answer).not.toHaveBeenCalled()
+    const next = { ...replacement, key: 'approval:2' }
+    source.interactions.set(new Map([['one', next]]))
+    const latest = (send.mock.calls.at(-1)?.[0] as { approval: NotificationApproval }).approval
+    expect(latest.token).not.toBe(initial.token)
+    source.interactions.set(new Map())
+    await expect(approvalTransport(client)!.answer({ sessionId: 'one', ...latest, decision: 'rejected' })).resolves.toBe('expired')
+    expect(next.answer).not.toHaveBeenCalled()
+    source.dispose()
+  })
+
+  it('rejects malformed decisions and mismatched identities without consuming a valid request', async () => {
+    const client = await loadClientModule()
+    const install = client.installSessionNotifications as (ctx: unknown, send: (value: unknown) => Promise<void>) => void
+    const source = notificationContext()
+    const send = vi.fn(async (_value: unknown) => {})
+    install(source.ctx, send)
+    const pending = { key: 'approval:1', kind: 'approval', sessionId: 'one', answer: vi.fn(async () => {}) }
+    source.interactions.set(new Map([['one', pending]]))
+    const approval = (send.mock.calls[0]?.[0] as { approval: NotificationApproval }).approval
+    const command = { sessionId: 'one', ...approval, decision: 'allowed-once' }
+    const transport = approvalTransport(client)!
+    for (const invalid of [null, {}, { ...command, decision: 'always-allow' }, { ...command, sessionId: 'other' }, { ...command, interactionKey: 'approval:2' }, { ...command, token: 'missing' }]) {
+      await expect(transport.answer(invalid)).resolves.toBe('expired')
+    }
+    expect(pending.answer).not.toHaveBeenCalled()
+    await expect(transport.answer(command)).resolves.toBe('answered')
+    expect(pending.answer).toHaveBeenCalledExactlyOnceWith('allowed-once')
+    source.dispose()
+  })
+
+  it('invalidates old HMR tokens and lets an older cleanup preserve the replacement transport', async () => {
+    const client = await loadClientModule()
+    const install = client.installSessionNotifications as (ctx: unknown, send: (value: unknown) => Promise<void>) => void
+    const oldSource = notificationContext()
+    const newSource = notificationContext()
+    const oldSend = vi.fn(async (_value: unknown) => {})
+    const newSend = vi.fn(async (_value: unknown) => {})
+    install(oldSource.ctx, oldSend)
+    const oldPending = { key: 'approval:1', kind: 'approval', sessionId: 'one', answer: vi.fn(async () => {}) }
+    oldSource.interactions.set(new Map([['one', oldPending]]))
+    const oldApproval = (oldSend.mock.calls[0]?.[0] as { approval: NotificationApproval }).approval
+    const oldTransport = approvalTransport(client)!
+    install(newSource.ctx, newSend)
+    const newTransport = approvalTransport(client)!
+    oldSource.dispose()
+    expect(approvalTransport(client)).toBe(newTransport)
+    const newPending = { ...oldPending, answer: vi.fn(async () => {}) }
+    newSource.interactions.set(new Map([['one', newPending]]))
+    const newApproval = (newSend.mock.calls[0]?.[0] as { approval: NotificationApproval }).approval
+    expect(newApproval.token).not.toBe(oldApproval.token)
+    const oldCommand = { sessionId: 'one', ...oldApproval, decision: 'allowed-once' }
+    await expect(oldTransport.answer(oldCommand)).resolves.toBe('expired')
+    await expect(newTransport.answer(oldCommand)).resolves.toBe('expired')
+    expect(oldPending.answer).not.toHaveBeenCalled()
+    expect(newPending.answer).not.toHaveBeenCalled()
+    await expect(newTransport.answer({ sessionId: 'one', ...newApproval, decision: 'rejected' })).resolves.toBe('answered')
+    expect(newPending.answer).toHaveBeenCalledExactlyOnceWith('rejected')
+    newSource.dispose()
+  })
+
+  it('consumes the token if the official answer rejects, leaving retries expired', async () => {
+    const client = await loadClientModule()
+    const install = client.installSessionNotifications as (ctx: unknown, send: (value: unknown) => Promise<void>) => void
+    const source = notificationContext()
+    const send = vi.fn(async (_value: unknown) => {})
+    install(source.ctx, send)
+    const pending = { key: 'approval:1', kind: 'approval', sessionId: 'one', answer: vi.fn(async () => { throw new Error('request already settled') }) }
+    source.interactions.set(new Map([['one', pending]]))
+    const approval = (send.mock.calls[0]?.[0] as { approval: NotificationApproval }).approval
+    const command = { sessionId: 'one', ...approval, decision: 'allowed-once' }
+    await expect(approvalTransport(client)!.answer(command)).rejects.toThrow('request already settled')
+    await expect(approvalTransport(client)!.answer(command)).resolves.toBe('expired')
+    expect(pending.answer).toHaveBeenCalledTimes(1)
+    source.dispose()
   })
 })

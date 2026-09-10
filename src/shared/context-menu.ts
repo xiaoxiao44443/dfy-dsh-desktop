@@ -7,6 +7,7 @@ export const CONTEXT_MENU_ICONS = [
   'undo',
   'redo',
   'select-all',
+  'inspect',
   'external-link',
   'browser',
   'link',

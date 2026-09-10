@@ -27,7 +27,7 @@ const generated = { type: 'dfy-session-image', version: 1, ref: 'session-image-r
 } }
 
 describe('DFY historical content admission', () => {
-  it.each(['0.1.5-alpha.1', '0.1.5-alpha.2', '0.1.5-rc.1'])('installs the admission hook for audited runtime %s', async (version) => {
+  it.each(['0.1.5-alpha.1', '0.1.5-alpha.2', '0.1.5-rc.1', '0.1.5-rc.2'])('installs the admission hook for audited runtime %s', async (version) => {
     const moduleRoot = join(root, version, 'node_modules', '@deepseek-ai', 'dsh-session-format-v2-to-v3')
     const entry = join(moduleRoot, 'lib', 'index.js')
     await mkdir(dirname(entry), { recursive: true })

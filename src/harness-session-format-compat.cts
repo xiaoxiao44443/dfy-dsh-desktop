@@ -64,7 +64,7 @@ export function assertDfyHistoryBlock(value: unknown): boolean {
   return true
 }
 
-/** Patch only the audited alpha.1/alpha.2/rc.1 admission boundary; leave all transformations intact. */
+/** Patch only the audited alpha.1/alpha.2/rc.1/rc.2 admission boundary; leave all transformations intact. */
 export function withDfyHistoryAdmission(source: string): string {
   const kinds = 'const CONTENT_KINDS = new Set(['
   const admission = 'function assertContentBlock(value, label) {\n\tconst block = record(value, label);'
@@ -82,7 +82,7 @@ export function registerDfySessionFormatCompatibility(): void {
       const loaded = nextLoad(url, context)
       if (!url.startsWith('file:') || !url.endsWith('/@deepseek-ai/dsh-session-format-v2-to-v3/lib/index.js')) return loaded
       const pkg = JSON.parse(readFileSync(new URL('../package.json', url), 'utf8')) as { version?: string }
-      if (!['0.1.5-alpha.1', '0.1.5-alpha.2', '0.1.5-rc.1'].includes(pkg.version ?? '')
+      if (!['0.1.5-alpha.1', '0.1.5-alpha.2', '0.1.5-rc.1', '0.1.5-rc.2'].includes(pkg.version ?? '')
         || loaded.source === null || loaded.source === undefined) return loaded
       const source = typeof loaded.source === 'string' ? loaded.source : Buffer.from(loaded.source as Uint8Array).toString('utf8')
       return { ...loaded, source: withDfyHistoryAdmission(source) }

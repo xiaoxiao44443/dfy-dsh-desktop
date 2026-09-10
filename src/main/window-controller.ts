@@ -2,7 +2,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { readFile } from 'node:fs/promises'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, nativeTheme, shell } from 'electron'
-import type { ContextMenuParams, WebContents, WebFrameMain } from 'electron'
+import type { ContextMenuParams, Session, WebContents, WebFrameMain } from 'electron'
 import type { BrowserDisplayMode, BrowserMenuKind, ColorTheme, DesktopApplicationMenuAction, DesktopBrowserMenuAnchor, DesktopBrowserNavigationAction, DesktopBrowserViewBounds, DesktopBrowserViewport, DesktopPlatform, DesktopState, DevelopmentPluginRequest, DfyPluginMutationRequest, HarnessLifecycle, PluginActivationRequest, PluginInitializationFailure, PluginInstallRequest, PluginRemoveRequest, PluginUpdateRequest, TitleMenuAction, WindowAction } from '../shared/contracts.js'
 import type { DesktopContextMenuActionRequest, DesktopContextMenuRequest, DesktopPointerInput, PluginContextMenuCollection } from '../shared/context-menu.js'
 import { DESKTOP_CONTEXT_MENU_TRANSPORT_KEY, parsePluginContextMenuCollection } from '../shared/context-menu.js'
@@ -11,6 +11,8 @@ import type { DevelopmentService } from './development-service.js'
 import type { PluginManagementService } from './plugin-management.js'
 import { parsePluginInitializationFailure, type PluginRecoveryService } from './plugin-recovery.js'
 import { appendPluginContextMenuItems, BUILTIN_CONTEXT_MENU_ACTIONS, buildBuiltinContextMenuItems } from './context-menu.js'
+import { installWindowMenuDismissal } from './window-menu-dismissal.js'
+import { BrowserDevToolsController } from './browser-devtools.js'
 import { DEFAULT_BROWSER_SETTINGS, type DesktopBrowserService } from './desktop-browser.js'
 import { isSupportedBrowserUrl } from '../shared/browser-address.js'
 import { openInDefaultBrowser } from './default-browser.js'
@@ -18,6 +20,8 @@ import { findContextMenuImagePath, revealContextMenuImage, saveContextMenuImage 
 import { installImageContextCapture } from './image-context.js'
 import type { DesktopApplicationMenuState } from '../shared/contracts.js'
 import type { DesktopUpdateService } from './desktop-update.js'
+import { filterHarnessRequestCookies } from './harness-request-cookies.js'
+import type { DesktopApprovalDecision, DesktopNotificationApproval } from './desktop-notifications.js'
 
 const STATE_CHANNEL = 'desktop:state'
 const CONTEXT_MENU_CHANNEL = 'desktop:context-menu'
@@ -74,6 +78,7 @@ interface PendingDesktopContextMenu {
   allowedItemIds: Set<string>
   items: DesktopContextMenuRequest['items']
   imageRevealPath?: string
+  canInspectElement?: boolean
   pluginToken?: string
 }
 
@@ -87,6 +92,8 @@ export class WindowController {
   private harnessUrl: string | undefined
   private harnessLoadId = 0
   private harnessOrigin: string | undefined
+  private rendererOrigin: string | undefined
+  private readonly harnessCookieSessions = new WeakSet<Session>()
   private pendingHarnessLoad: PendingHarnessLoad | undefined
   private harnessLoadProbeTimer: NodeJS.Timeout | undefined
   private harnessLoadProbeInFlight = false
@@ -98,6 +105,7 @@ export class WindowController {
   private pluginFailureProbeInFlight = false
   private contextMenuSequence = 0
   private pendingContextMenu: PendingDesktopContextMenu | undefined
+  private readonly browserDevTools = new BrowserDevToolsController()
 
   constructor(
     private readonly runtime: HarnessRuntimeManager,
@@ -126,9 +134,10 @@ export class WindowController {
     this.browser?.on('context-menu', (params: ContextMenuParams, contents: WebContents, source: 'floating' | 'page') => {
       void this.openBrowserContextMenu(params, contents, source)
     })
-    this.browser?.on('context-menu-dismiss', (requestId: string) => {
-      void this.dismissContextMenu(requestId, true)
+    this.browser?.on('context-menu-dismiss', (requestId: string, restoreFocus = true) => {
+      void this.dismissContextMenu(requestId, restoreFocus)
     })
+    this.browser?.on('menu-interaction', () => this.resetContextMenuPresentation())
     this.browser?.on('application-menu-action', (action: DesktopApplicationMenuAction) => {
       void this.handleApplicationMenuAction(action)
     })
@@ -141,6 +150,7 @@ export class WindowController {
     }
 
     this.theme = await this.readConfiguredTheme()
+    this.browserDevTools.setTheme(this.theme)
     this.browser?.setTheme(this.theme)
 
     const developerToolsEnabled = !app.isPackaged || process.argv.includes('--enable-devtools')
@@ -172,7 +182,25 @@ export class WindowController {
       },
     })
     this.window = window
+    const browserSession = window.webContents.session
+    if (!this.harnessCookieSessions.has(browserSession)) {
+      // Electron keeps only one listener per event. Install once per session,
+      // and read the current origin dynamically as Harness restarts.
+      browserSession.webRequest.onBeforeSendHeaders({ urls: ['http://127.0.0.1:*/*', 'ws://127.0.0.1:*/*'] }, (details, callback) => {
+        callback({ requestHeaders: filterHarnessRequestCookies(details.url, details.requestHeaders, this.harnessOrigin, this.rendererOrigin) })
+      })
+      this.harnessCookieSessions.add(browserSession)
+    }
     installImageContextCapture(window.webContents)
+    installWindowMenuDismissal(window, () => {
+      this.browser?.closeMenu()
+      this.resetContextMenu()
+      if (!window.webContents.isDestroyed()) {
+        // A native title-bar interaction has no DOM target. Reuse the shell's
+        // outside-pointer dismissal without synthesizing a page mouse event.
+        window.webContents.send(POINTER_INPUT_CHANNEL, { x: -1, y: -1, button: 'left' } satisfies DesktopPointerInput)
+      }
+    })
 
     window.on('maximize', () => this.publishState())
     window.on('unmaximize', () => this.publishState())
@@ -249,6 +277,7 @@ export class WindowController {
       ? process.env.HARNESS_DESKTOP_RENDERER_URL
       : undefined
     const rendererUrl = rendererDevUrl ?? this.rendererUrl
+    this.rendererOrigin = rendererUrl === undefined ? undefined : this.safeOrigin(rendererUrl)
     if (rendererUrl !== undefined) {
       const url = new URL(rendererUrl)
       url.searchParams.set('theme', this.theme)
@@ -363,6 +392,26 @@ export class WindowController {
       sessionId,
     })
     void frame.executeJavaScript(`window.postMessage(${message}, location.origin)`).catch(() => undefined)
+  }
+
+  async answerNotificationApproval(
+    request: DesktopNotificationApproval,
+    decision: DesktopApprovalDecision,
+  ): Promise<'answered' | 'expired'> {
+    if (decision !== 'allowed-once' && decision !== 'rejected') return 'expired'
+    const frame = this.findHarnessFrame()
+    if (frame === undefined || !this.isHarnessFrame(frame)) return 'expired'
+    const origin = this.harnessOrigin
+    const payload = JSON.stringify({ ...request, decision })
+    // Execute only in the current Harness document. The client capability is
+    // bound to the original approval and expires on replacement or reload.
+    const result: unknown = await frame.executeJavaScript(`(async () => {
+      if (location.origin !== ${JSON.stringify(origin)}) return 'expired';
+      const transport = window[Symbol.for('dsh.desktop.notification-approval.transport.v1')];
+      if (typeof transport?.answer !== 'function') return 'expired';
+      return await transport.answer(${payload});
+    })()`)
+    return result === 'answered' ? 'answered' : 'expired'
   }
 
   private registerIpc(): void {
@@ -487,6 +536,11 @@ export class WindowController {
       if (event.sender !== this.window?.webContents) return
       await this.browser?.setDisplayMode(mode)
     })
+    ipcMain.handle('desktop:claim-shell-menu', (event) => {
+      if (event.sender !== this.window?.webContents) return
+      this.browser?.closeMenu()
+      this.resetContextMenu()
+    })
     ipcMain.handle('desktop:browser-open-menu', async (event, kind: BrowserMenuKind, anchor: DesktopBrowserMenuAnchor) => {
       if (event.sender !== this.window?.webContents) return
       const applicationState: DesktopApplicationMenuState | undefined = kind === 'application'
@@ -565,12 +619,10 @@ export class WindowController {
     })
     ipcMain.handle('desktop:context-menu-select', async (event, request: DesktopContextMenuActionRequest) => {
       if (event.sender !== this.window?.webContents && this.browser?.ownsMenuWebContents(event.sender) !== true) return
-      this.browser?.closeMenu()
       await this.selectContextMenuItem(request)
     })
     ipcMain.handle('desktop:context-menu-dismiss', async (event, requestId: string, restoreFocus: boolean) => {
       if (event.sender !== this.window?.webContents && this.browser?.ownsMenuWebContents(event.sender) !== true) return
-      this.browser?.closeMenu()
       await this.dismissContextMenu(requestId, restoreFocus !== false)
     })
   }
@@ -606,10 +658,9 @@ export class WindowController {
     const window = this.window
     if (window === undefined || window.isDestroyed() || window.webContents.isLoadingMainFrame()) return
     const harnessContext = this.isHarnessFrame(frame)
-    const sequence = ++this.contextMenuSequence
-    const previous = this.pendingContextMenu
-    this.pendingContextMenu = undefined
-    if (previous !== undefined) void this.releasePluginContextMenu(previous, false)
+    this.browser?.closeMenu()
+    this.resetContextMenuPresentation()
+    const sequence = this.contextMenuSequence
 
     const builtins = buildBuiltinContextMenuItems(params, {
       embeddedBrowserEnabled: this.browser?.state.settings.enabled === true,
@@ -717,6 +768,7 @@ export class WindowController {
     const effectiveBuiltins = buildBuiltinContextMenuItems({ ...params, linkURL: effectiveLinkURL }, {
       embeddedBrowserEnabled: this.browser?.state.settings.enabled === true,
       imageCanReveal: pending.imageRevealPath !== undefined,
+      inspectElementEnabled: pending.canInspectElement === true,
     })
     const items = appendPluginContextMenuItems(effectiveBuiltins, pluginCollection.items)
     pending.linkURL = effectiveLinkURL
@@ -737,13 +789,15 @@ export class WindowController {
     source: 'floating' | 'page',
   ): Promise<void> {
     const frame = params.frame
-    if (frame === null || contents.isDestroyed()) return
-    const sequence = ++this.contextMenuSequence
-    const previous = this.pendingContextMenu
-    this.pendingContextMenu = undefined
-    if (previous !== undefined) void this.releasePluginContextMenu(previous, false)
+    if (frame === null || frame.isDestroyed() || contents.isDestroyed()) return
+    this.browser?.closeMenu()
+    this.resetContextMenuPresentation()
+    const sequence = this.contextMenuSequence
 
-    const items = buildBuiltinContextMenuItems(params, { embeddedBrowserEnabled: true })
+    const items = buildBuiltinContextMenuItems(params, {
+      embeddedBrowserEnabled: true,
+      inspectElementEnabled: source === 'page',
+    })
       .filter((entry) => entry.kind === 'separator' || entry.id !== 'desktop.open-link-in-browser')
     while (items[0]?.kind === 'separator') items.shift()
     while (items.at(-1)?.kind === 'separator') items.pop()
@@ -762,6 +816,7 @@ export class WindowController {
       isEditable: params.isEditable,
       items,
       allowedItemIds: new Set(items.flatMap((entry) => entry.kind === 'item' && entry.enabled ? [entry.id] : [])),
+      canInspectElement: source === 'page',
     }
     const pending = this.pendingContextMenu
     if (pending.allowedItemIds.has('desktop.copy-image') && !await this.prepareImageContextMenu(pending, params)) return
@@ -804,7 +859,10 @@ export class WindowController {
       }
       if (path !== undefined) {
         pending.imageRevealPath = path
-        const reveal = buildBuiltinContextMenuItems(params, { imageCanReveal: true })
+        const reveal = buildBuiltinContextMenuItems(params, {
+          imageCanReveal: true,
+          inspectElementEnabled: pending.canInspectElement === true,
+        })
           .find((entry) => entry.kind === 'item' && entry.id === 'desktop.reveal-image')
         if (reveal !== undefined) {
           const copyIndex = pending.items.findIndex((entry) => entry.kind === 'item' && entry.id === 'desktop.copy-image')
@@ -854,6 +912,7 @@ export class WindowController {
     const pending = this.pendingContextMenu
     if (pending === undefined || pending.requestId !== request.requestId || !pending.allowedItemIds.has(request.itemId)) return
     this.pendingContextMenu = undefined
+    this.browser?.closeMenu()
 
     const builtin = BUILTIN_CONTEXT_MENU_ACTIONS[request.itemId]
     if (builtin !== undefined) {
@@ -877,6 +936,7 @@ export class WindowController {
     const pending = this.pendingContextMenu
     if (pending === undefined || pending.requestId !== requestId) return
     this.pendingContextMenu = undefined
+    this.browser?.closeMenu()
     if (restoreFocus) await this.focusContextMenuFrame(pending.frame)
     await this.releasePluginContextMenu(pending, restoreFocus)
   }
@@ -885,6 +945,16 @@ export class WindowController {
     pending: PendingDesktopContextMenu,
     action: (typeof BUILTIN_CONTEXT_MENU_ACTIONS)[string],
   ): Promise<void> {
+    if (action === 'inspect-element') {
+      if (pending.canInspectElement !== true || pending.contents.isDestroyed() || pending.frame.isDestroyed()
+        || [pending.x, pending.y].some((value) => !Number.isInteger(value) || value < 0 || value > 2_147_483_647)) return
+      // Keep the original page and viewport coordinates even if another tab is now active.
+      await this.browserDevTools.open(pending.contents)
+      if (!pending.contents.isDestroyed() && !pending.frame.isDestroyed()) {
+        pending.contents.inspectElement(pending.x, pending.y)
+      }
+      return
+    }
     if (action === 'open-link-in-browser') {
       if (isSupportedBrowserUrl(pending.linkURL) && this.browser?.state.settings.enabled === true) {
         await this.browser.setPanelOpen(true)
@@ -1010,6 +1080,14 @@ export class WindowController {
     await pending.frame.executeJavaScript(
       `${CONTEXT_MENU_TRANSPORT_EXPRESSION}?.dismiss?.(${JSON.stringify(token)}, ${JSON.stringify(restoreFocus)})`,
     ).catch(() => undefined)
+  }
+
+  private resetContextMenuPresentation(): void {
+    this.resetContextMenu()
+    const contents = this.window?.webContents
+    if (contents !== undefined && !contents.isDestroyed()) {
+      contents.send(POINTER_INPUT_CHANNEL, { x: -1, y: -1, button: 'left' } satisfies DesktopPointerInput)
+    }
   }
 
   private resetContextMenu(): void {
@@ -1224,10 +1302,10 @@ export class WindowController {
       if (frame === undefined) return
       this.themeProbeInFlight = true
       try {
-        const preference = await this.readConfiguredThemePreference()
-        const theme = resolveHarnessThemePreference(preference, nativeTheme.shouldUseDarkColors)
+        const theme = await this.readConfiguredTheme()
         if ((theme === 'dark' || theme === 'light') && theme !== this.theme) {
           this.theme = theme
+          this.browserDevTools.setTheme(theme)
           this.browser?.setTheme(theme)
           this.publishState()
         }
@@ -1253,6 +1331,9 @@ export class WindowController {
 
   private async readConfiguredTheme(): Promise<ColorTheme> {
     const preference = await this.readConfiguredThemePreference()
+    // Native window frames follow Electron's theme source. Restore 'system'
+    // before reading its color so a previous explicit override cannot stick.
+    if (nativeTheme.themeSource !== preference) nativeTheme.themeSource = preference
     return resolveHarnessThemePreference(preference, nativeTheme.shouldUseDarkColors)
   }
 

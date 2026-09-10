@@ -15,6 +15,7 @@ export type BuiltinContextMenuAction =
   | 'open-link-in-browser'
   | 'open-link'
   | 'copy-link'
+  | 'inspect-element'
 
 export const BUILTIN_CONTEXT_MENU_ACTIONS: Readonly<Record<string, BuiltinContextMenuAction>> = {
   'desktop.undo': 'undo',
@@ -29,6 +30,7 @@ export const BUILTIN_CONTEXT_MENU_ACTIONS: Readonly<Record<string, BuiltinContex
   'desktop.open-link-in-browser': 'open-link-in-browser',
   'desktop.open-link': 'open-link',
   'desktop.copy-link': 'copy-link',
+  'desktop.inspect-element': 'inspect-element',
 }
 
 type ContextMenuSnapshot = Pick<ContextMenuParams, 'isEditable' | 'selectionText' | 'linkURL' | 'editFlags'>
@@ -57,7 +59,7 @@ function appendGroup(items: ContextMenuEntry[], group: ContextMenuActionEntry[],
 
 export function buildBuiltinContextMenuItems(
   snapshot: ContextMenuSnapshot,
-  options: { embeddedBrowserEnabled?: boolean; platform?: NodeJS.Platform; imageCanReveal?: boolean } = {},
+  options: { embeddedBrowserEnabled?: boolean; platform?: NodeJS.Platform; imageCanReveal?: boolean; inspectElementEnabled?: boolean } = {},
 ): ContextMenuEntry[] {
   const items: ContextMenuEntry[] = []
   const copyableImage = (snapshot.mediaType === 'image'
@@ -102,6 +104,11 @@ export function buildBuiltinContextMenuItems(
     appendGroup(items, [
       action('desktop.select-all', '全选', 'select-all', snapshot.editFlags.canSelectAll),
     ], 'selection')
+  }
+  if (options.inspectElementEnabled === true) {
+    appendGroup(items, [
+      action('desktop.inspect-element', '检查', 'inspect', true),
+    ], 'inspect')
   }
   return items
 }

@@ -22,6 +22,7 @@ export interface BrowserSnapshotElement {
   width: number
   height: number
   disabled: boolean
+  inViewport?: boolean
 }
 
 export interface BrowserSnapshot {
@@ -35,6 +36,7 @@ export interface BrowserSnapshot {
   documentWidth: number
   documentHeight: number
   elements: BrowserSnapshotElement[]
+  omittedElements?: number
 }
 
 export interface SnapshotTarget {
@@ -62,6 +64,8 @@ export interface BrowserLocatorMatch {
   height: number
   visible: boolean
   enabled: boolean
+  inViewport?: boolean
+  hitTarget?: boolean
   innerText: string
   textContent: string | null
   attribute?: string | null
@@ -134,6 +138,7 @@ export interface BrowserTabRuntime {
   snapshotVersion: number
   navigationVersion: number
   lastNavigationKind: 'document' | 'same-document'
+  lastNavigationFailure?: { url: string; message: string; at: number }
   inflightRequests: Set<string>
   inflightRequestDetails?: Map<string, { url: string; type: string; startedAt: number }>
   networkActivityVersion?: number

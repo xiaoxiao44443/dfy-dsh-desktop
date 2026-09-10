@@ -10,6 +10,7 @@ window.__ModuleLoader__.load({
 
 		const SETTINGS_PATH = "/api/dsh-desktop/notifications/settings";
 		const SHOW_PATH = "/api/dsh-desktop/notifications/show";
+		const NOTIFICATION_APPROVAL_TRANSPORT_KEY = "dsh.desktop.notification-approval.transport.v1";
 		const DEFAULT_SETTINGS = Object.freeze({
 			turnCompletion: "unfocused",
 			permissionRequests: true,
@@ -271,20 +272,23 @@ window.__ModuleLoader__.load({
 			};
 		}
 
-		function projectSessions(snapshot) {
+		function projectSessions(snapshot, interactions) {
 			const projected = new Map();
-			if (snapshot === null || typeof snapshot !== "object") return projected;
-			const byId = snapshot.byId;
-			if (byId === null || typeof byId !== "object") return projected;
-			for (const [id, value] of Object.entries(byId)) {
+			const byId = snapshot !== null && typeof snapshot === "object" ? snapshot.byId : undefined;
+			for (const [id, value] of Object.entries(byId ?? {})) {
 				if (value === null || typeof value !== "object") continue;
 				projected.set(id, {
 					id,
 					displayTitle: typeof value.displayTitle === "string" ? value.displayTitle : id,
 					running: value.running === true,
-					pendingInteraction: value.pendingInteraction,
+					pendingInteraction: interactions === undefined ? value.pendingInteraction : undefined,
 					updatedAt: typeof value.updatedAt === "number" ? value.updatedAt : 0
 				});
+			}
+			for (const [id, interaction] of interactions ?? []) {
+				if (interaction === null || typeof interaction !== "object" || typeof interaction.kind !== "string") continue;
+				const current = projected.get(id) ?? { id, displayTitle: id, running: false, updatedAt: 0 };
+				projected.set(id, { ...current, pendingInteraction: interaction.kind, interactionKey: interaction.key, interaction });
 			}
 			return projected;
 		}
@@ -294,7 +298,7 @@ window.__ModuleLoader__.load({
 			for (const [id, current] of next) {
 				const prior = previous.get(id);
 				const interactionChanged = current.pendingInteraction !== undefined
-					&& current.pendingInteraction !== prior?.pendingInteraction;
+					&& (current.pendingInteraction !== prior?.pendingInteraction || current.interactionKey !== prior?.interactionKey);
 				let kind;
 				if (interactionChanged && current.pendingInteraction === "approval") kind = "approval";
 				else if (interactionChanged && current.pendingInteraction === "question") kind = "question";
@@ -304,7 +308,7 @@ window.__ModuleLoader__.load({
 					kind,
 					sessionId: id,
 					sessionTitle: current.displayTitle,
-					key: `${kind}:${id}:${current.updatedAt}`
+					key: `${kind}:${id}:${current.interactionKey ?? current.updatedAt}`
 				});
 			}
 			return notifications;
@@ -338,7 +342,8 @@ window.__ModuleLoader__.load({
 			return latestAssistantMessage(binding)?.marker;
 		}
 
-		function waitForSessionValue(binding, read, timeoutMs = 1e3) {
+		function waitForSessionValue(binding, read, timeoutMs = 1e3, signal) {
+			if (signal?.aborted) return Promise.resolve(void 0);
 			const immediate = read();
 			if (immediate !== void 0) return Promise.resolve(immediate);
 			const session = binding?.session;
@@ -346,11 +351,13 @@ window.__ModuleLoader__.load({
 			return new Promise((resolve) => {
 				let settled = false;
 				let unsubscribe = () => {};
+				const aborted = () => finish(void 0);
 				const finish = (value) => {
 					if (settled) return;
 					settled = true;
 					clearTimeout(timer);
 					unsubscribe();
+					signal?.removeEventListener("abort", aborted);
 					resolve(value);
 				};
 				const check = () => {
@@ -359,34 +366,38 @@ window.__ModuleLoader__.load({
 				};
 				const timer = setTimeout(() => finish(void 0), timeoutMs);
 				unsubscribe = session.subscribe(check);
+				signal?.addEventListener("abort", aborted, { once: true });
+				if (signal?.aborted) aborted();
 				queueMicrotask(check);
 			});
 		}
 
-		function waitForAssistantReply(binding, baseline, timeoutMs) {
+		function waitForAssistantReply(binding, baseline, timeoutMs, signal) {
 			return waitForSessionValue(binding, () => {
 				const current = latestAssistantMessage(binding);
 				if (current === void 0 || current.marker === baseline) return void 0;
 				return current.text;
-			}, timeoutMs);
+			}, timeoutMs, signal);
 		}
 
-		function pendingInteractionSummary(binding, status) {
-			let pending;
-			try { pending = binding?.session?.getSnapshot?.()?.pending; } catch { return void 0; }
-			if (!Array.isArray(pending)) return void 0;
+		function pendingInteractionSummary(binding, status, interaction) {
+			let detail = interaction;
+			if (detail === undefined) {
+				let pending;
+				try { pending = binding?.session?.getSnapshot?.()?.pending; } catch { return void 0; }
+				if (!Array.isArray(pending)) return void 0;
+				detail = [...pending].reverse().find((item) => item?.kind === (status === "approval" ? "approval" : "question"))?.payload;
+			}
+			if (detail === null || typeof detail !== "object") return void 0;
 			if (status === "approval") {
-				const wait = [...pending].reverse().find((item) => item?.kind === "approval");
-				if (wait === void 0 || wait.payload === null || typeof wait.payload !== "object") return void 0;
-				const reason = typeof wait.payload.reason === "string" ? wait.payload.reason.trim() : "";
-				const toolName = typeof wait.payload.toolName === "string" ? wait.payload.toolName.trim() : "";
+				const reason = typeof detail.reason === "string" ? detail.reason.trim() : "";
+				const toolName = typeof detail.toolName === "string" ? detail.toolName.trim() : "";
 				if (reason.length > 0 && toolName.length > 0) return `${toolName}：${reason}`.slice(0, 4e3);
 				if (reason.length > 0) return reason.slice(0, 4e3);
 				if (toolName.length > 0) return `请求使用 ${toolName}`;
 				return void 0;
 			}
-			const wait = [...pending].reverse().find((item) => item?.kind === "question");
-			const questions = wait?.payload?.questions;
+			const questions = detail.questions;
 			if (!Array.isArray(questions) || questions.length === 0) return void 0;
 			const question = status === "plan-review"
 				? questions.find((item) => item?.intent?.kind === "plan-review") ?? questions[0]
@@ -394,15 +405,147 @@ window.__ModuleLoader__.load({
 			if (question === null || typeof question !== "object") return void 0;
 			const questionText = typeof question.question === "string" ? question.question.trim() : "";
 			const header = typeof question.header === "string" ? question.header.trim() : "";
-			const detail = typeof question.detail === "string" ? question.detail.trim() : "";
+			const questionDetail = typeof question.detail === "string" ? question.detail.trim() : "";
 			if (status !== "plan-review" && questionText.length > 0 && header.length > 0
 				&& !questionText.includes(header)) return `${header}：${questionText}`.slice(0, 4e3);
-			const summary = [questionText, header, detail].find((value) => value.length > 0);
+			const summary = [questionText, header, questionDetail].find((value) => value.length > 0);
 			return summary?.slice(0, 4e3);
 		}
 
-		function waitForPendingInteractionSummary(binding, status, timeoutMs) {
-			return waitForSessionValue(binding, () => pendingInteractionSummary(binding, status), timeoutMs);
+		function waitForPendingInteractionSummary(binding, status, timeoutMs, signal) {
+			return waitForSessionValue(binding, () => pendingInteractionSummary(binding, status), timeoutMs, signal);
+		}
+
+		function createNotificationApprovals(readInteractions, isActive) {
+			const requests = new Map();
+			let tokens = new WeakMap();
+			const matches = (request) => {
+				const current = readInteractions()?.get(request.sessionId);
+				return current === request.interaction && current.kind === "approval"
+					&& current.key === request.interactionKey && current.sessionId === request.sessionId
+					&& typeof current.answer === "function";
+			};
+			const transport = Object.freeze({
+				async answer(value) {
+					if (!isActive() || value === null || typeof value !== "object"
+						|| (value.decision !== "allowed-once" && value.decision !== "rejected")) return "expired";
+					const request = requests.get(value.token);
+					if (request === undefined || request.sessionId !== value.sessionId || request.interactionKey !== value.interactionKey) return "expired";
+					// Consume before invoking the real object, so concurrent clicks cannot answer twice.
+					requests.delete(value.token);
+					if (!matches(request)) return "expired";
+					await request.interaction.answer(value.decision);
+					return "answered";
+				}
+			});
+			return {
+				transport,
+				register(sessionId, interaction) {
+					if (!isActive() || interaction?.kind !== "approval" || typeof interaction.answer !== "function"
+						|| typeof interaction.key !== "string" || interaction.key.length === 0) return;
+					const request = { sessionId, interactionKey: interaction.key, interaction };
+					if (!matches(request)) return;
+					let token = tokens.get(interaction);
+					if (token === undefined) {
+						token = globalThis.crypto.randomUUID();
+						tokens.set(interaction, token);
+						requests.set(token, request);
+					}
+					if (requests.has(token)) return { token, interactionKey: interaction.key };
+				},
+				prune() {
+					for (const [token, request] of requests) {
+						if (matches(request)) continue;
+						requests.delete(token);
+						tokens.delete(request.interaction);
+					}
+				},
+				clear() { requests.clear(); tokens = new WeakMap(); }
+			};
+		}
+
+		function installSessionNotifications(ctx, send = postNotification) {
+			let active = true;
+			const cancel = new AbortController();
+			let interactions;
+			const approvals = createNotificationApprovals(() => interactions?.getSnapshot(), () => active);
+			const transportWindow = window;
+			const transportSymbol = Symbol.for(NOTIFICATION_APPROVAL_TRANSPORT_KEY);
+			const snapshot = () => projectSessions(ctx.sessions.list.getSnapshot(), interactions?.getSnapshot());
+			let previous = snapshot();
+			const runBaselines = new Map();
+			const runVersions = new Map();
+			for (const [id, session] of previous) {
+				if (session.running) runBaselines.set(id, latestAssistantMarker(ctx.sessions.binding(id)));
+			}
+			const onSessionsChanged = () => {
+				if (!active) return;
+				approvals.prune();
+				const next = snapshot();
+				for (const [id, session] of next) {
+					if (session.running && !previous.get(id)?.running) {
+						runBaselines.set(id, latestAssistantMarker(ctx.sessions.binding(id)));
+						runVersions.set(id, (runVersions.get(id) ?? 0) + 1);
+					}
+				}
+				const notifications = diffSessionNotifications(previous, next);
+				previous = next;
+				for (const notification of notifications) {
+					const binding = ctx.sessions.binding(notification.sessionId);
+					const baseline = runBaselines.get(notification.sessionId);
+					const runVersion = runVersions.get(notification.sessionId);
+					const interaction = next.get(notification.sessionId)?.interaction;
+					if (notification.kind === "turn-complete") runBaselines.delete(notification.sessionId);
+					void (async () => {
+						// Controller and UI-interaction stores publish independently; let both settle before completion checks.
+						if (notification.kind === "turn-complete") await new Promise((resolve) => setTimeout(resolve, 0));
+						if (!active) return;
+						const summary = notification.kind === "turn-complete"
+							? await waitForAssistantReply(binding, baseline, undefined, cancel.signal)
+							: interaction !== undefined
+								? pendingInteractionSummary(binding, notification.kind, interaction)
+								: await waitForPendingInteractionSummary(binding, notification.kind, undefined, cancel.signal);
+						if (!active) return;
+						const current = snapshot().get(notification.sessionId);
+						if (notification.kind === "turn-complete" && (current === undefined || current.running || current.pendingInteraction !== undefined || runVersions.get(notification.sessionId) !== runVersion)) return;
+						if (summary !== void 0) notification.summary = summary;
+						if (notification.kind === "approval") {
+							const approval = approvals.register(notification.sessionId, interaction);
+							if (approval !== undefined) notification.approval = approval;
+						}
+						await send(notification);
+					})();
+				}
+			};
+			ctx.effect(() => {
+				Object.defineProperty(transportWindow, transportSymbol, { configurable: true, enumerable: false, value: approvals.transport });
+				const unsubscribe = ctx.sessions.list.subscribe(onSessionsChanged);
+				return () => {
+					active = false;
+					cancel.abort();
+					unsubscribe();
+					approvals.clear();
+					if (transportWindow[transportSymbol] === approvals.transport) delete transportWindow[transportSymbol];
+				};
+			}, "desktop-notifications: session transitions");
+			// A child injection waits for the newer UI service without requiring it on old Harness versions.
+			ctx.inject(["uiSession"], (uiCtx) => {
+				const source = uiCtx.uiSession.pendingInteractions;
+				if (source === undefined) return;
+				uiCtx.effect(() => {
+					interactions = source;
+					const unsubscribe = source.subscribe(onSessionsChanged);
+					onSessionsChanged();
+					return () => {
+						unsubscribe();
+						if (interactions === source) {
+							interactions = undefined;
+							approvals.clear();
+							previous = snapshot();
+						}
+					};
+				}, "desktop-notifications: pending interactions");
+			});
 		}
 
 		async function postNotification(notification) {
@@ -632,6 +775,8 @@ window.__ModuleLoader__.load({
 		exports.latestAssistantMarker = latestAssistantMarker;
 		exports.waitForAssistantReply = waitForAssistantReply;
 		exports.pendingInteractionSummary = pendingInteractionSummary;
+		exports.installSessionNotifications = installSessionNotifications;
+		exports.NOTIFICATION_APPROVAL_TRANSPORT_KEY = NOTIFICATION_APPROVAL_TRANSPORT_KEY;
 		exports.DesktopContextMenuService = DesktopContextMenuService;
 		exports.createDesktopContextMenuInspectProvider = createDesktopContextMenuInspectProvider;
 		exports.apply = function apply(ctx) {
@@ -643,35 +788,7 @@ window.__ModuleLoader__.load({
 				"desktop-context-menu: inspect provider"
 			);
 
-			let previous = projectSessions(ctx.sessions.list.getSnapshot());
-			const runBaselines = new Map();
-			for (const [id, session] of previous) {
-				if (session.running) runBaselines.set(id, latestAssistantMarker(ctx.sessions.binding(id)));
-			}
-			const onSessionsChanged = () => {
-				const next = projectSessions(ctx.sessions.list.getSnapshot());
-				for (const [id, session] of next) {
-					if (session.running && !previous.get(id)?.running) {
-						runBaselines.set(id, latestAssistantMarker(ctx.sessions.binding(id)));
-					}
-				}
-				const notifications = diffSessionNotifications(previous, next);
-				previous = next;
-				for (const notification of notifications) {
-					const binding = ctx.sessions.binding(notification.sessionId);
-					const baseline = runBaselines.get(notification.sessionId);
-					if (notification.kind === "turn-complete") runBaselines.delete(notification.sessionId);
-					void (async () => {
-						const summary = notification.kind === "turn-complete"
-							? await waitForAssistantReply(binding, baseline)
-							: await waitForPendingInteractionSummary(binding, notification.kind);
-						if (summary !== void 0) notification.summary = summary;
-						await postNotification(notification);
-					})();
-				}
-			};
-			const unsubscribe = ctx.sessions.list.subscribe(onSessionsChanged);
-			ctx.effect(() => unsubscribe, "desktop-notifications: session transitions");
+			installSessionNotifications(ctx);
 
 			const onDesktopMessage = (event) => {
 				const value = event.data;

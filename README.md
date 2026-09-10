@@ -12,7 +12,7 @@ DeepSeek Harness 的轻量 Electron 桌面壳。Harness 仍是完整、未修改
 - 桌面端不覆盖 `DSH_HOME`：Harness 遵循官方解析顺序（显式配置、`$DSH_HOME`、`~/.dsh`）。因此外部 dsh 与桌面端自然共享配置、会话、Profile、凭据和扩展；项目工作区仍由 Harness 自己管理。
 - 桌面壳自己的 Chromium 状态、运行时、更新缓存和开发设置统一位于 `~/.saltfish/dfy-dsh-desktop`，Windows、macOS 与 Linux 使用同一目录约定。首次启动会自动迁移旧版 `~/.saltfish/deepseek-harness-desktop`。
 - Harness 核心安装在版本化目录。新版本先由 pnpm 安装到 staging，经桌面启动器运行 `dsh --version` 并核对输出后才标记待更新；兼容旧版自动执行入口与 `0.1.5-alpha.1` 的显式 `runCli()` 入口。下次启动先试运行新版本，失败会显示原因；回退和手动切换前检查已落盘的会话日志格式，阻止旧运行时读取升级后的会话。
-- 当前桌面端为 `0.1.5-rc.1-1`，内置 DSH 为 `0.1.5-rc.1`。对 `0.1.5-alpha.1`、`0.1.5-alpha.2` 和 `0.1.5-rc.1` 的旧日志迁移，启动器仅为已审计的 `dfy-media` 图片块和 `dfy-session-image` 生成图片块补充结构校验及准入，保留原内容和资源引用。事件转换、原日志保留和新版日志发布仍由 DSH 执行；未知块及未知字段继续拒绝迁移。侧栏点击不存在的会话时会显示错误提示。
+- 当前桌面端与内置 DSH 均为 `0.1.5-rc.2`。对 `0.1.5-alpha.1`、`0.1.5-alpha.2`、`0.1.5-rc.1` 和 `0.1.5-rc.2` 的旧日志迁移，启动器仅为已审计的 `dfy-media` 图片块和 `dfy-session-image` 生成图片块补充结构校验及准入，保留原内容和资源引用。事件转换、原日志保留和新版日志发布仍由 DSH 执行；未知块及未知字段继续拒绝迁移。侧栏点击不存在的会话时会显示错误提示。
 - 桌面端为每个受管 Harness 运行时生成同源的 `dsh`、`pnpm` 和 `node` 启动器，并把它们注入 Harness 进程的 `PATH`。因此标题菜单里的开发操作、Harness 自己的终端和 Agent 启动的子进程使用的是同一套版本，不会出现“壳能用、dsh 自己不能用”的分叉。
 - 桌面端通过内置 Host + Client 插件 `dsh-desktop-bridge` 提供受审批的 `desktop_restart_harness` 工具、回复/权限/提问系统通知，并监测当前 Web Profile 是否在进程启动后发生变化。模型可以请求由 Electron 主进程安全重启 Harness，从而加载新安装的插件；桥接层使用桌面私有 `--patch` 和专用模块解析器注入。桌面端还会在当前 Web Profile 的 `node_modules` 中维护 `dsh-desktop-bridge`、`dsh-desktop-browser` 的目录链接，供官方插件清单检查读取包名和版本。启动与插件命令结束时会修复缺失、失效的链接；同名普通文件或目录会报错并保留。此过程不改写 Profile 的依赖声明或 bundle 配置。
 
@@ -29,7 +29,7 @@ pnpm dev
 
 `pnpm dev` 会先编译 Electron 主进程，再并行启动 Vite 与 Electron。修改 `src/renderer` 下的 React/CSS 会热更新桌面壳，不会重启 Harness；修改主进程代码后需重启开发命令。
 
-发布版默认禁用 Chromium DevTools；`pnpm dev` 保留调试能力，方便开发桌面壳。
+发布版默认禁用桌面壳的 Chromium DevTools；`pnpm dev` 保留桌面壳调试能力。内置浏览器的网页可通过右键“检查”打开独立 DevTools 并定位元素，窗口图标、网址标题及明暗主题与桌面端保持一致。
 
 检查：
 

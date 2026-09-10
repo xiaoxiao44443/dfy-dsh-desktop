@@ -14,7 +14,9 @@ import type { BrowserOverlayMenuKind } from './desktop-browser-types.js'
 
 const BROWSER_MENU_PRELOAD = fileURLToPath(new URL('../browser-menu-preload.cjs', import.meta.url))
 const MENU_STATE_CHANNEL = 'desktop-browser:menu-state'
-const MENU_SHADOW_PADDING = 28
+// Keep in sync with browser-menu.css: the 28px blur extends beyond its
+// nominal radius, and its 12px downward offset needs extra transparent space.
+const MENU_SHADOW_PADDING = 56
 const MENU_OFFSCREEN_BOUNDS: Rectangle = Object.freeze({ x: -32_000, y: -32_000, width: 1, height: 1 })
 
 interface DesktopBrowserMenuControllerOptions {
@@ -42,6 +44,7 @@ export class DesktopBrowserMenuController {
   private applicationState: DesktopApplicationMenuState | undefined
   private targetBounds: Rectangle | undefined
   private presented = false
+  private openSequence = 0
   private renderSequence = 0
   private readonly renderWaiters = new Map<number, () => void>()
 
@@ -121,6 +124,7 @@ export class DesktopBrowserMenuController {
   }
 
   destroy(): void {
+    this.openSequence += 1
     this.resetActiveState()
     for (const resolve of this.renderWaiters.values()) resolve()
     this.renderWaiters.clear()
@@ -139,7 +143,9 @@ export class DesktopBrowserMenuController {
     applicationState?: DesktopApplicationMenuState,
   ): Promise<void> {
     this.close()
+    const sequence = this.openSequence
     const menu = await this.ensure(host)
+    if (sequence !== this.openSequence) return
     this.view = menu
     this.hostWindow = host
     this.kind = kind
@@ -151,7 +157,9 @@ export class DesktopBrowserMenuController {
 
   async openContext(host: BrowserWindow, request: DesktopContextMenuRequest): Promise<boolean> {
     this.close()
+    const sequence = this.openSequence
     const menu = await this.ensure(host)
+    if (sequence !== this.openSequence) return false
     this.view = menu
     this.hostWindow = host
     this.kind = 'context'
@@ -162,9 +170,9 @@ export class DesktopBrowserMenuController {
     this.resize(212, Math.max(40, requestedHeight))
     try {
       await this.renderAndPresent(menu)
-      return true
+      return sequence === this.openSequence
     } catch {
-      this.close()
+      if (sequence === this.openSequence) this.close()
       return false
     }
   }
@@ -195,6 +203,7 @@ export class DesktopBrowserMenuController {
   }
 
   close(): string | undefined {
+    this.openSequence += 1
     const menu = this.view
     const requestId = this.kind === 'context' ? this.contextRequest?.requestId : undefined
     this.resetActiveState()
@@ -280,12 +289,13 @@ export class DesktopBrowserMenuController {
   }
 
   private async renderAndPresent(menu: BrowserWindow): Promise<void> {
+    const sequence = this.openSequence
     const token = ++this.renderSequence
     const rendered = new Promise<void>((resolve) => this.renderWaiters.set(token, resolve))
     this.sendState(token)
     await Promise.race([rendered, new Promise<void>((resolve) => setTimeout(resolve, 120))])
     this.renderWaiters.delete(token)
-    if (this.view !== menu || menu.isDestroyed() || this.targetBounds === undefined) return
+    if (sequence !== this.openSequence || this.view !== menu || menu.isDestroyed() || this.targetBounds === undefined) return
     this.presented = true
     menu.setBounds(this.targetBounds)
     menu.showInactive()

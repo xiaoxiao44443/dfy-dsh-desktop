@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events'
+import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -21,6 +22,9 @@ import type {
 import type { DesktopContextMenuRequest } from '../shared/context-menu.js'
 import { isSupportedBrowserUrl, normalizeBrowserPageUrl, normalizeLocalHtmlUrl } from '../shared/browser-address.js'
 import { installImageContextCapture } from './image-context.js'
+import { ACTIVE_INPUT_EXPRESSION, PREPARE_BROWSER_INPUT, VERIFY_BROWSER_INPUT } from './browser-input.js'
+import { BROWSER_HIT_TARGET_HELPERS } from './browser-hit-target.js'
+import { BROWSER_ROLE_VISIBILITY_HELPERS } from './browser-role-visibility.js'
 import type {
   BrowserAsyncEventKind,
   BrowserAsyncEventWaiter,
@@ -36,8 +40,10 @@ import type {
   DesktopBrowserAgentRequest,
 } from './desktop-browser-types.js'
 import { DesktopBrowserMenuController } from './desktop-browser-menu-controller.js'
+import { installWindowMenuDismissal } from './window-menu-dismissal.js'
 import {
   evaluatePage,
+  navigationFailureMessage,
   parseLocatorPlan,
   prepareReadOnlyEvaluation,
   readNavigationState,
@@ -183,12 +189,13 @@ export class DesktopBrowserService extends EventEmitter {
   private viewportLayoutTimer: NodeJS.Timeout | undefined
   private viewportApplyRunning = false
   private viewportApplyDirty = false
+  private readonly inputScales = new WeakMap<WebContents, number>()
   private browserSessionConfigured = false
   private closingFloatingWindow = false
   private floatingOverlayOpen = false
   private shellOverlayOpen = false
   private shellOverlaySnapshot: DesktopBrowserShellSnapshot | undefined
-  private shellSnapshotCapture: Promise<DesktopBrowserShellSnapshot | undefined> | undefined
+  private shellSnapshotCapture: { generation: number; promise: Promise<DesktopBrowserShellSnapshot | undefined> } | undefined
   private shellSnapshotGeneration = 0
   private shellOverlaySequence = 0
   private theme: ColorTheme = 'light'
@@ -438,6 +445,7 @@ export class DesktopBrowserService extends EventEmitter {
         ? this.floatingWindow
         : this.window
     if (host === undefined || host.isDestroyed()) return
+    this.emit('menu-interaction')
     await this.menuController.openPage(kind, host, anchor, applicationState)
   }
 
@@ -485,7 +493,8 @@ export class DesktopBrowserService extends EventEmitter {
   }
 
   async setZoomFactor(value: number): Promise<void> {
-    if (!Number.isFinite(value)) return
+    const tab = this.activeTab()
+    if (!Number.isFinite(value) || tab === undefined || tab.url.length === 0 || tab.view.webContents.isDestroyed()) return
     this.zoomFactor = Math.max(0.5, Math.min(2, Math.round(value * 10) / 10))
     this.invalidateShellSnapshot()
     const contents = (await this.ensureView()).webContents
@@ -501,7 +510,7 @@ export class DesktopBrowserService extends EventEmitter {
       if (tab !== undefined) delete tab.viewport
       const contents = this.view?.webContents
       if (contents !== undefined && !contents.isDestroyed() && contents.debugger.isAttached()) {
-        await contents.debugger.sendCommand('Emulation.clearDeviceMetricsOverride').catch(() => undefined)
+        await this.sendDebuggerCommand(contents, 'Emulation.clearDeviceMetricsOverride')
       }
       this.layoutFloatingView()
       this.changed()
@@ -580,8 +589,12 @@ export class DesktopBrowserService extends EventEmitter {
   }
 
   async refreshShellSnapshot(): Promise<DesktopBrowserShellSnapshot | undefined> {
-    if (this.shellOverlayOpen) return this.shellOverlaySnapshot
-    if (this.shellSnapshotCapture !== undefined) return await this.shellSnapshotCapture
+    if (this.shellOverlayOpen && this.shellOverlaySnapshot !== undefined) return this.shellOverlaySnapshot
+    const pending = this.shellSnapshotCapture
+    if (pending !== undefined) {
+      const snapshot = await pending.promise
+      return pending.generation === this.shellSnapshotGeneration ? snapshot : await this.refreshShellSnapshot()
+    }
     const view = this.view
     const viewUrl = view?.webContents.getURL()
     const generation = this.shellSnapshotGeneration
@@ -602,56 +615,64 @@ export class DesktopBrowserService extends EventEmitter {
       }
       const viewBounds = this.bounds
       if (viewBounds === undefined || generation !== this.shellSnapshotGeneration) return undefined
-      const capturedImage = await view.webContents.capturePage().catch(() => undefined)
-      if (
-        capturedImage === undefined
-        || capturedImage.isEmpty()
-        || generation !== this.shellSnapshotGeneration
-        || this.view !== view
-        || this.viewHostWindow !== this.window
-        || this.bounds === undefined
-        || !sameBounds(this.bounds, viewBounds)
-        || view.webContents.getURL() !== viewUrl
-        || !this.panelOpen
-      ) return undefined
-      // Device emulation keeps a logical viewport (for example 583x860) and
-      // applies a compositor scale so it fits the smaller WebContentsView.
-      // capturePage() returns that logical surface at the display's pixel
-      // density, including the unused area outside the physical view. Crop in
-      // captured-image pixels so the shell neither reapplies the device scale
-      // nor loses the display scale factor.
-      const imageSize = capturedImage.getSize()
-      const captureScaleX = this.viewport === undefined ? 1 : imageSize.width / this.viewport.width
-      const captureScaleY = this.viewport === undefined ? 1 : imageSize.height / this.viewport.height
-      const cropWidth = Math.min(imageSize.width, Math.max(1, Math.round(viewBounds.width * captureScaleX)))
-      const cropHeight = Math.min(imageSize.height, Math.max(1, Math.round(viewBounds.height * captureScaleY)))
-      const image = this.viewport !== undefined
-        && cropWidth > 0
-        && cropHeight > 0
-        && (cropWidth < imageSize.width || cropHeight < imageSize.height)
-        ? capturedImage.crop({ x: 0, y: 0, width: cropWidth, height: cropHeight })
-        : capturedImage
-      const jpeg = image.toJPEG(80)
-      if (jpeg.length === 0) return undefined
-      const snapshot = {
-        dataUrl: `data:image/jpeg;base64,${jpeg.toString('base64')}`,
-        bounds: { ...viewBounds },
+      const tab = this.tabForView(view)
+      if (tab === undefined) return undefined
+      // An open shell menu hides the native view. Reuse the screenshot host
+      // so a zoom change is painted before replacing the menu's cached image.
+      const page = await this.capturePageImage(tab).catch(() => undefined)
+      if (page === undefined) return undefined
+      try {
+        const capturedImage = page.image
+        if (
+          capturedImage.isEmpty()
+          || generation !== this.shellSnapshotGeneration
+          || this.view !== view
+          || this.viewHostWindow !== this.window
+          || this.bounds === undefined
+          || !sameBounds(this.bounds, viewBounds)
+          || view.webContents.getURL() !== viewUrl
+          || !this.panelOpen
+        ) return undefined
+        // Device emulation keeps a logical viewport (for example 583x860) and
+        // applies a compositor scale so it fits the smaller WebContentsView.
+        // Crop in captured-image pixels without applying that scale twice.
+        const imageSize = capturedImage.getSize()
+        const captureScaleX = this.viewport === undefined ? 1 : imageSize.width / this.viewport.width
+        const captureScaleY = this.viewport === undefined ? 1 : imageSize.height / this.viewport.height
+        const cropWidth = Math.min(imageSize.width, Math.max(1, Math.round(viewBounds.width * captureScaleX)))
+        const cropHeight = Math.min(imageSize.height, Math.max(1, Math.round(viewBounds.height * captureScaleY)))
+        const image = this.viewport !== undefined
+          && cropWidth > 0
+          && cropHeight > 0
+          && (cropWidth < imageSize.width || cropHeight < imageSize.height)
+          ? capturedImage.crop({ x: 0, y: 0, width: cropWidth, height: cropHeight })
+          : capturedImage
+        const jpeg = image.toJPEG(80)
+        if (jpeg.length === 0) return undefined
+        const snapshot = {
+          dataUrl: `data:image/jpeg;base64,${jpeg.toString('base64')}`,
+          bounds: { ...viewBounds },
+        }
+        this.shellOverlaySnapshot = snapshot
+        return snapshot
+      } finally {
+        page.release()
+        // The menu can close while the temporary capture host is active.
+        if (this.view === view) this.setNativeVisible(!this.shellOverlayOpen)
       }
-      this.shellOverlaySnapshot = snapshot
-      return snapshot
     })()
-    this.shellSnapshotCapture = capture
+    const pendingCapture = { generation, promise: capture }
+    this.shellSnapshotCapture = pendingCapture
     try {
       return await capture
     } finally {
-      if (this.shellSnapshotCapture === capture) this.shellSnapshotCapture = undefined
+      if (this.shellSnapshotCapture === pendingCapture) this.shellSnapshotCapture = undefined
     }
   }
 
   private invalidateShellSnapshot(): void {
     this.shellSnapshotGeneration += 1
     this.shellOverlaySnapshot = undefined
-    this.shellSnapshotCapture = undefined
   }
 
   async setShellOverlay(value: DesktopBrowserViewBounds | null): Promise<DesktopBrowserShellSnapshot | undefined> {
@@ -724,7 +745,12 @@ export class DesktopBrowserService extends EventEmitter {
     const url = normalizeBrowserAddress(value, allowSearch)
     const before = await readNavigationState(tab, this.debuggerCommandFor.bind(this))
     const replaceSyntheticBlank = tab.syntheticBlankHistory
-    await tab.view.webContents.loadURL(url)
+    try {
+      await tab.view.webContents.loadURL(url)
+    } catch (error) {
+      throw new Error(navigationFailureMessage(tab.view.webContents.getURL(), url,
+        error instanceof Error ? error.message : String(error)), { cause: error })
+    }
     if (replaceSyntheticBlank && !tab.view.webContents.isDestroyed()) {
       tab.view.webContents.navigationHistory.clear()
       tab.syntheticBlankHistory = false
@@ -793,8 +819,10 @@ export class DesktopBrowserService extends EventEmitter {
     const latest = retry.outcome?.state ?? await readNavigationState(tab, this.debuggerCommandFor.bind(this))
     return {
       ok: false,
-      status: 'timeout',
+      status: retry.outcome?.status === 'failed' ? 'failed' : 'timeout',
       reason: retry.error instanceof Error ? retry.error.message : retry.outcome?.reason ?? 'history-navigation-failed',
+      message: navigationFailureMessage(latest.url, targetUrl,
+        retry.error instanceof Error ? retry.error.message : latest.failure?.message ?? retry.outcome?.reason ?? '历史导航未完成'),
       tabId: tab.id,
       action,
       attempts: retry.attempts,
@@ -824,6 +852,8 @@ export class DesktopBrowserService extends EventEmitter {
       ok: outcome.status === 'success',
       status: outcome.status,
       ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
+      ...(outcome.status === 'success' ? {} : { message: navigationFailureMessage(outcome.state.url, before.url,
+        outcome.state.failure?.message ?? outcome.reason ?? '页面重新加载未完成') }),
       tabId: tab.id,
       action,
       url: outcome.state.url,
@@ -984,10 +1014,10 @@ export class DesktopBrowserService extends EventEmitter {
           released.push(tabId)
           continue
         }
-        await this.closeTab(tabId)
+        await this.closeTab(tabId, true)
         closed.push(tabId)
       }
-      return { ok: true, closed, released, tabs: this.sessionTabStates(sessionId) }
+      return { ok: true, closed, released, panelOpen: this.panelOpen, tabs: this.sessionTabStates(sessionId) }
     }
     this.agentStatuses.set(sessionId, true)
     const tab = await this.agentTabForRequest(sessionId, request)
@@ -998,6 +1028,8 @@ export class DesktopBrowserService extends EventEmitter {
         ok: outcome.status === 'success',
         status: outcome.status,
         ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
+        ...(outcome.status === 'success' ? {} : { message: navigationFailureMessage(outcome.state.url, request.url,
+          outcome.state.failure?.message ?? outcome.reason ?? '页面导航未完成') }),
         tabId: tab.id,
         url: outcome.state.url || normalizeBrowserAddress(request.url, false),
         elapsedMs: outcome.elapsedMs,
@@ -1058,8 +1090,8 @@ export class DesktopBrowserService extends EventEmitter {
       return await this.navigationActionFor(tab, action)
     }
     if (action === 'close') {
-      await this.closeTab(tab.id)
-      return { ok: true, tabId: tab.id }
+      await this.closeTab(tab.id, true)
+      return { ok: true, tabId: tab.id, panelOpen: this.panelOpen }
     }
     throw new Error(`不支持的浏览器操作：${action || 'unknown'}`)
   }
@@ -1450,10 +1482,15 @@ export class DesktopBrowserService extends EventEmitter {
       },
     })
     this.floatingWindow = floating
+    installWindowMenuDismissal(floating, () => {
+      const requestId = this.closeMenu()
+      if (requestId !== undefined) this.emit('context-menu-dismiss', requestId, false)
+    })
     floating.webContents.on('before-mouse-event', (_event, input) => {
       if (input.type !== 'mouseDown') return
       const requestId = this.closeMenu()
-      if (requestId !== undefined) this.emit('context-menu-dismiss', requestId)
+      this.emit('menu-interaction')
+      if (requestId !== undefined) this.emit('context-menu-dismiss', requestId, false)
     })
     floating.webContents.on('before-input-event', (_event, input) => this.closeMenuForSystemKey(input))
     floating.webContents.on('context-menu', (event, params) => {
@@ -1739,6 +1776,7 @@ export class DesktopBrowserService extends EventEmitter {
         contextIsolation: true,
         sandbox: true,
         spellcheck: true,
+        devTools: true,
       },
     })
     const tab: BrowserTabRuntime = {
@@ -1790,7 +1828,8 @@ export class DesktopBrowserService extends EventEmitter {
     contents.on('before-mouse-event', (_event, input) => {
       if (input.type !== 'mouseDown') return
       const requestId = this.closeMenu()
-      if (requestId !== undefined) this.emit('context-menu-dismiss', requestId)
+      this.emit('menu-interaction')
+      if (requestId !== undefined) this.emit('context-menu-dismiss', requestId, false)
     })
     contents.on('before-input-event', (_event, input) => this.closeMenuForSystemKey(input))
     contents.on('context-menu', (event, params) => {
@@ -1825,6 +1864,15 @@ export class DesktopBrowserService extends EventEmitter {
       if (this.activeTabId === tab.id) this.shellOverlaySnapshot = undefined
       this.changed()
     })
+    contents.on('did-start-navigation', (_event, _url, isInPlace, isMainFrame) => {
+      if (isMainFrame && !isInPlace) delete tab.lastNavigationFailure
+    })
+    contents.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
+      // Aborted loads are expected when a navigation is replaced or stopped.
+      if (isMainFrame && code !== -3) {
+        tab.lastNavigationFailure = { url, message: `${description} (${String(code)})`, at: Date.now() }
+      }
+    })
     contents.on('did-stop-loading', () => {
       tab.loading = false
       this.capturePageState(tab)
@@ -1842,6 +1890,7 @@ export class DesktopBrowserService extends EventEmitter {
     contents.on('did-navigate-in-page', () => {
       tab.navigationVersion += 1
       tab.lastNavigationKind = 'same-document'
+      delete tab.lastNavigationFailure
       this.invalidateTabSnapshot(tab)
       this.capturePageState(tab)
       this.scheduleHistoryRecord(tab)
@@ -2154,7 +2203,27 @@ export class DesktopBrowserService extends EventEmitter {
   private async debuggerCommand(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
     const contents = (await this.ensureView()).webContents
     if (!contents.debugger.isAttached()) contents.debugger.attach('1.3')
-    return await contents.debugger.sendCommand(method, params)
+    return await this.sendDebuggerCommand(contents, method, params)
+  }
+
+  private async sendDebuggerCommand(contents: WebContents, method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+    if (method === 'Input.dispatchMouseEvent') {
+      // Device-preview scale is a compositor transform. CDP does not apply it
+      // to input coordinates, whereas ordinary page zoom is already handled.
+      const scale = this.inputScales.get(contents) ?? 1
+      const wheelScale = scale * contents.getZoomFactor()
+      params = {
+        ...params,
+        ...(typeof params.x === 'number' ? { x: params.x * scale } : {}),
+        ...(typeof params.y === 'number' ? { y: params.y * scale } : {}),
+        ...(typeof params.deltaX === 'number' ? { deltaX: params.deltaX * wheelScale } : {}),
+        ...(typeof params.deltaY === 'number' ? { deltaY: params.deltaY * wheelScale } : {}),
+      }
+    }
+    const result = await contents.debugger.sendCommand(method, params)
+    if (method === 'Emulation.setDeviceMetricsOverride') this.inputScales.set(contents, typeof params.scale === 'number' ? params.scale : 1)
+    else if (method === 'Emulation.clearDeviceMetricsOverride') this.inputScales.delete(contents)
+    return result
   }
 
   private async debuggerCommandFor(tab: BrowserTabRuntime, method: string, params: Record<string, unknown> = {}): Promise<unknown> {
@@ -2163,7 +2232,7 @@ export class DesktopBrowserService extends EventEmitter {
     if (tab.viewport === undefined && !tab.view.getVisible() && !tab.backgroundViewportActive) {
       const bounds = tab.view.getBounds()
       if (bounds.width <= 1 || bounds.height <= 1) tab.view.setBounds({ x: 0, y: 0, ...BACKGROUND_VIEWPORT })
-      await contents.debugger.sendCommand('Emulation.setDeviceMetricsOverride', {
+      await this.sendDebuggerCommand(contents, 'Emulation.setDeviceMetricsOverride', {
         ...BACKGROUND_VIEWPORT,
         deviceScaleFactor: 1,
         mobile: false,
@@ -2177,7 +2246,7 @@ export class DesktopBrowserService extends EventEmitter {
       })
       tab.backgroundViewportActive = true
     }
-    return await contents.debugger.sendCommand(method, params)
+    return await this.sendDebuggerCommand(contents, method, params)
   }
 
   private async frameSnapshotSections(tab: BrowserTabRuntime): Promise<string[]> {
@@ -2187,6 +2256,16 @@ export class DesktopBrowserService extends EventEmitter {
       if (visited >= 12 || parent.isDestroyed()) return
       const descriptors = await parent.executeJavaScript(`(() => [...document.querySelectorAll('iframe,frame')].map((element, index) => ({
         index,
+        rendered: (() => {
+          const rect = element.getBoundingClientRect();
+          const style = getComputedStyle(element);
+          if (rect.width <= 1 || rect.height <= 1 || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+          for (let ancestor = element; ancestor; ancestor = ancestor.parentElement) {
+            const computed = getComputedStyle(ancestor);
+            if (computed.display === 'none' || computed.contentVisibility === 'hidden' || Number(computed.opacity || 1) <= .01) return false;
+          }
+          return true;
+        })(),
         tag: element.tagName.toLowerCase(),
         tagIndex: [...document.querySelectorAll(element.tagName.toLowerCase())].indexOf(element) + 1,
         name: String(element.name || ''),
@@ -2196,7 +2275,8 @@ export class DesktopBrowserService extends EventEmitter {
       const children = parent.frames.filter((frame) => !frame.isDestroyed())
       for (const raw of descriptors) {
         if (visited >= 12) return
-        const descriptor = raw as { index?: unknown; tag?: unknown; tagIndex?: unknown; name?: unknown; url?: unknown }
+        const descriptor = raw as { index?: unknown; tag?: unknown; tagIndex?: unknown; name?: unknown; url?: unknown; rendered?: unknown }
+        if (descriptor.rendered === false) continue
         const byName = typeof descriptor.name === 'string' && descriptor.name.length > 0
           ? children.filter((child) => child.name === descriptor.name)
           : []
@@ -2219,7 +2299,16 @@ export class DesktopBrowserService extends EventEmitter {
           const visible = (element) => {
             const style = getComputedStyle(element);
             const rect = element.getBoundingClientRect();
-            return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) > .01 && rect.width > 0 && rect.height > 0;
+            if (style.visibility === 'hidden' || style.visibility === 'collapse' || rect.width <= 1 || rect.height <= 1) return false;
+            for (let ancestor = element; ancestor; ancestor = ancestor.parentElement) {
+              const computed = getComputedStyle(ancestor);
+              if (computed.display === 'none' || computed.contentVisibility === 'hidden' || Number(computed.opacity || 1) <= .01) return false;
+            }
+            return true;
+          };
+          const inViewport = (element) => {
+            const rect = element.getBoundingClientRect();
+            return rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth;
           };
           const role = (element) => {
             const explicit = normalize(element.getAttribute('role')).split(' ')[0];
@@ -2239,24 +2328,27 @@ export class DesktopBrowserService extends EventEmitter {
             return 'textbox';
           };
           const name = (element) => normalize(element.getAttribute('aria-label') || element.getAttribute('alt') || element.getAttribute('title') || element.innerText || element.textContent || element.getAttribute('placeholder'));
-          const elements = [...document.querySelectorAll('a[href],button,input,textarea,select,summary,[role],[data-testid],[aria-label],[contenteditable="true"]')]
-            .filter(visible).slice(0, 60).map((element) => ({ role: role(element), name: name(element).slice(0, 160), testId: element.getAttribute('data-testid') || '', placeholder: element.getAttribute('placeholder') || '' }));
+          const candidates = [...document.querySelectorAll('a[href],button,input,textarea,select,summary,[role],[data-testid],[aria-label],[contenteditable="true"]')].filter(visible);
+          const selected = candidates.filter(inViewport).slice(0, 60);
+          selected.push(...candidates.filter((element) => !inViewport(element) && name(element)
+            && element.matches('a[href],button,input,textarea,select,summary,[role="button"],[role="link"],[role="textbox"],[contenteditable="true"]')).slice(0, Math.min(10, 60 - selected.length)));
+          const elements = selected.map((element) => ({ role: role(element), name: name(element).slice(0, 160), testId: element.getAttribute('data-testid') || '', placeholder: element.getAttribute('placeholder') || '', inViewport: inViewport(element) }));
           return { url: location.href, title: document.title, text: String(document.body?.innerText || '').slice(0, 3000), elements };
         })()`, false).catch(() => undefined) as { url?: unknown; title?: unknown; text?: unknown; elements?: unknown } | undefined
         if (value !== undefined) {
           const locator = nextChain.map((entry) => `frameLocator(${JSON.stringify(entry)})`).join('.')
           const elementLines = Array.isArray(value.elements) ? value.elements.map((entry) => {
-            const item = entry as { role?: unknown; name?: unknown; testId?: unknown; placeholder?: unknown }
+            const item = entry as { role?: unknown; name?: unknown; testId?: unknown; placeholder?: unknown; inViewport?: unknown }
             const name = typeof item.name === 'string' && item.name.length > 0 ? ` “${item.name}”` : ''
             const testId = typeof item.testId === 'string' && item.testId.length > 0 ? ` data-testid="${item.testId}"` : ''
             const placeholder = typeof item.placeholder === 'string' && item.placeholder.length > 0 ? ` placeholder="${item.placeholder}"` : ''
-            return `- ${String(item.role ?? 'element')}${name}${testId}${placeholder}`
+            return `- ${String(item.role ?? 'element')}${name}${testId}${placeholder}${item.inViewport === false ? ' [outside frame viewport]' : ''}`
           }) : []
           sections.push([
             `Frame: ${locator}`,
             `URL: ${String(value.url ?? child.url)}`,
             `Title: ${String(value.title ?? '')}`,
-            'Visible text:',
+            'Page text (may include content outside frame viewport):',
             typeof value.text === 'string' && value.text.trim().length > 0 ? value.text.trim() : '(empty)',
             'Interactive elements:',
             elementLines.length > 0 ? elementLines.join('\n') : '(none)',
@@ -2271,12 +2363,19 @@ export class DesktopBrowserService extends EventEmitter {
 
   private async snapshot(tab: BrowserTabRuntime): Promise<Record<string, unknown>> {
     const expression = `(() => {
-      const visible = (element) => {
+      const rendered = (element) => {
         const style = getComputedStyle(element);
         const rect = element.getBoundingClientRect();
-        return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) > 0.01
-          && rect.width > 1 && rect.height > 1 && rect.bottom > 0 && rect.right > 0
-          && rect.top < innerHeight && rect.left < innerWidth;
+        if (style.visibility === 'hidden' || style.visibility === 'collapse' || rect.width <= 1 || rect.height <= 1) return false;
+        for (let ancestor = element; ancestor; ancestor = ancestor.parentElement) {
+          const computed = getComputedStyle(ancestor);
+          if (computed.display === 'none' || computed.contentVisibility === 'hidden' || Number(computed.opacity || 1) <= 0.01) return false;
+        }
+        return true;
+      };
+      const inViewport = (element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth;
       };
       const label = (element) => {
         const aria = element.getAttribute('aria-label');
@@ -2311,20 +2410,29 @@ export class DesktopBrowserService extends EventEmitter {
         if (!['hidden', 'color', 'file'].includes(type)) return 'textbox';
         return '';
       };
-      const candidates = [...document.querySelectorAll('a[href],button,input,textarea,select,summary,label,h1,h2,h3,h4,h5,h6,[role],[data-testid],[aria-label],[contenteditable="true"],[tabindex]:not([tabindex="-1"])')]
-        .filter(visible).slice(0, ${String(MAX_SNAPSHOT_ELEMENTS)});
+      const renderedElements = [...document.querySelectorAll('a[href],button,input,textarea,select,summary,label,h1,h2,h3,h4,h5,h6,[role],[data-testid],[aria-label],[contenteditable="true"],[tabindex]:not([tabindex="-1"])')].filter(rendered);
+      const visibleElements = renderedElements.filter(inViewport);
+      const interactiveRoles = new Set(['button','link','checkbox','radio','textbox','searchbox','combobox','listbox','option','switch','slider','spinbutton','tab','menuitem','menuitemcheckbox','menuitemradio','treeitem']);
+      const outsideElements = renderedElements.filter((element) => !inViewport(element)
+        && (interactiveRoles.has(role(element)) || element.matches('input:not([type="hidden"]),[contenteditable="true"],[tabindex]:not([tabindex="-1"])'))
+        && (label(element) || element.getAttribute('data-testid') || element.getAttribute('placeholder')));
+      const candidates = visibleElements.slice(0, ${String(MAX_SNAPSHOT_ELEMENTS)});
+      candidates.push(...outsideElements.slice(0, Math.min(40, ${String(MAX_SNAPSHOT_ELEMENTS)} - candidates.length)));
       const storeKey = Symbol.for('dfy-dsh-desktop.browser.snapshot-refs');
       let store = globalThis[storeKey];
       if (!store || !(store.refs instanceof WeakMap) || !Number.isSafeInteger(store.next)) {
         store = { refs: new WeakMap(), next: 1 };
         globalThis[storeKey] = store;
       }
+      // Only the latest snapshot is actionable; bound the reverse index without retaining DOM nodes.
+      store.elements = new Map();
       const refFor = (element) => {
         let ref = store.refs.get(element);
         if (ref === undefined) {
           ref = store.next++;
           store.refs.set(element, ref);
         }
+        store.elements.set(ref, new WeakRef(element));
         return ref;
       };
       return {
@@ -2336,6 +2444,7 @@ export class DesktopBrowserService extends EventEmitter {
         scrollY: Math.round(scrollY),
         documentWidth: Math.max(document.documentElement?.scrollWidth || 0, document.body?.scrollWidth || 0),
         documentHeight: Math.max(document.documentElement?.scrollHeight || 0, document.body?.scrollHeight || 0),
+        omittedElements: visibleElements.length + outsideElements.length - candidates.length,
         text: String(document.body?.innerText || '').slice(0, ${String(MAX_SNAPSHOT_TEXT)}),
         elements: candidates.map((element) => {
           const rect = element.getBoundingClientRect();
@@ -2358,6 +2467,7 @@ export class DesktopBrowserService extends EventEmitter {
               return option.value === text || option.value === '' ? text : text + ' (' + option.value.slice(0, 80) + ')';
             }) : [],
             x: Math.round(rect.left), y: Math.round(rect.top), width: Math.round(rect.width), height: Math.round(rect.height),
+            inViewport: inViewport(element),
             disabled: Boolean(element.disabled || element.getAttribute('aria-disabled') === 'true')
           };
         })
@@ -2389,6 +2499,7 @@ export class DesktopBrowserService extends EventEmitter {
       y: element.y,
       width: element.width,
       height: element.height,
+      inViewport: element.inViewport,
       disabled: element.disabled,
     })]))
     const previous = tab.lastSnapshot
@@ -2407,7 +2518,7 @@ export class DesktopBrowserService extends EventEmitter {
       changeLines.push(`Added elements: ${refs(added)}`)
       changeLines.push(`Removed elements: ${refs(removed)}`)
       changeLines.push(`Changed elements: ${refs(changed)}`)
-      changeLines.push(`Visible text changed: ${previous.text === value.text ? 'no' : 'yes'}`)
+      changeLines.push(`Page text changed: ${previous.text === value.text ? 'no' : 'yes'}`)
     }
     const lines = value.elements.map((element) => {
       tab.snapshotTargets.set(element.ref, {
@@ -2428,7 +2539,8 @@ export class DesktopBrowserService extends EventEmitter {
       const multiple = element.multiple ? ' multiple' : ''
       const options = element.options.length === 0 ? '' : ` options=[${element.options.map((option) => JSON.stringify(option)).join(', ')}]`
       const disabled = element.disabled ? ' disabled' : ''
-      return `[${String(element.ref)}] ${role}${type}${name}${testId}${placeholder}${currentValue}${href}${checked}${expanded}${multiple}${options}${disabled} @ (${String(element.x)},${String(element.y)}) ${String(element.width)}×${String(element.height)}`
+      const outside = element.inViewport === false ? ' [outside viewport]' : ''
+      return `[${String(element.ref)}] ${role}${type}${name}${testId}${placeholder}${currentValue}${href}${checked}${expanded}${multiple}${options}${disabled}${outside} @ (${String(element.x)},${String(element.y)}) ${String(element.width)}×${String(element.height)}`
     })
     const frameSections = await this.frameSnapshotSections(tab)
     const snapshot = [
@@ -2442,11 +2554,12 @@ export class DesktopBrowserService extends EventEmitter {
       `Changes since snapshot version ${previous === undefined ? '(none)' : String(previous.version)}:`,
       ...changeLines,
       '',
-      'Visible text:',
+      'Page text (may include content outside viewport):',
       value.text.trim() || '(empty)',
       '',
       'Interactive elements:',
       lines.join('\n') || '(none)',
+      ...(value.omittedElements ? [`${String(value.omittedElements)} more elements omitted; scroll or use a locator to inspect them.`] : []),
       ...(frameSections.length === 0 ? [] : ['', 'Frames:', ...frameSections.flatMap((section, index) => index === 0 ? [section] : ['', section])]),
     ].join('\n')
     tab.lastSnapshot = {
@@ -2625,6 +2738,8 @@ export class DesktopBrowserService extends EventEmitter {
             && rect.width > 0 && rect.height > 0;
         };
         const enabled = (element) => !Boolean(element.disabled || element.getAttribute('aria-disabled') === 'true');
+        ${BROWSER_HIT_TARGET_HELPERS}
+        ${BROWSER_ROLE_VISIBILITY_HELPERS}
         const inputEvent = (inputType, data) => typeof InputEvent === 'function'
           ? new InputEvent('input', { bubbles: true, composed: true, inputType, data })
           : new Event('input', { bubbles: true, composed: true });
@@ -2634,6 +2749,7 @@ export class DesktopBrowserService extends EventEmitter {
           return undefined;
         };
         const setEditableValue = (element, value, inputType = 'insertText') => {
+          if (element.readOnly || element.getAttribute('aria-readonly') === 'true') return false;
           const current = editableValue(element);
           if (current === undefined) return false;
           element.focus();
@@ -2739,7 +2855,7 @@ export class DesktopBrowserService extends EventEmitter {
             }
             let candidates = unique(roots.flatMap(descendants)).filter((element) => !['script', 'style', 'noscript', 'template'].includes(element.tagName.toLowerCase()));
             if (step.kind === 'role') {
-              candidates = candidates.filter((element) => implicitRole(element) === step.value
+              candidates = candidates.filter((element) => accessibleByRole(element) && implicitRole(element) === step.value
                 && (step.name === undefined || matches(accessibleName(element), step.name, step.exact === true))
                 && (step.namePattern === undefined || new RegExp(step.namePattern, step.nameFlags || '').test(accessibleName(element))));
             } else if (step.kind === 'text') {
@@ -2759,8 +2875,8 @@ export class DesktopBrowserService extends EventEmitter {
         };
         const roots = resolveSteps(plan);
         const elements = roots.filter((value) => value instanceof Element);
-        if (elements.length === 1 && ['click', 'fill', 'type', 'press', 'press-sequentially', 'select-option', 'download-media'].includes(operation)) {
-          elements[0].scrollIntoView({ block: 'center', inline: 'center' });
+        if (elements.length === 1 && ['prepare-click', 'click', 'fill', 'type', 'press', 'press-sequentially', 'select-option', 'download-media'].includes(operation)) {
+          elements[0].scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
         }
         const first = elements[0];
         const result = {
@@ -2770,6 +2886,7 @@ export class DesktopBrowserService extends EventEmitter {
         };
         if (first) {
           const rect = first.getBoundingClientRect();
+          const point = ['prepare-click', 'click'].includes(operation) ? clickablePoint(first) : undefined;
           result.first = {
             x: rect.left + rect.width / 2,
             y: rect.top + rect.height / 2,
@@ -2777,10 +2894,14 @@ export class DesktopBrowserService extends EventEmitter {
             height: rect.height,
             visible: visible(first),
             enabled: enabled(first),
+            ...(point ?? {}),
             innerText: String(first.innerText || '').slice(0, 20000),
             textContent: first.textContent === null ? null : String(first.textContent).slice(0, 20000),
             ...(attribute === undefined ? {} : { attribute: first.getAttribute(attribute) }),
           };
+          if (operation === 'click' && !point?.hitTarget) {
+            return { ...result, error: point?.inViewport ? 'Locator 目标被其他元素遮挡，无法接收点击。' : 'Locator 目标在滚动后仍位于可点击视口外。' };
+          }
           if (operation === 'download-media') {
             const source = first.currentSrc || first.href || first.src || first.getAttribute('href') || first.getAttribute('src');
             if (source) result.mediaUrl = new URL(source, document.baseURI).href;
@@ -2819,9 +2940,8 @@ export class DesktopBrowserService extends EventEmitter {
           if (!visible(first)) return { ...result, error: 'Locator resolves to a hidden element' };
           if (!enabled(first)) return { ...result, error: 'Locator resolves to a disabled element' };
           if (typeof first.dispatchEvent !== 'function') return { ...result, error: 'Locator does not resolve to a clickable element' };
-          const rect = first.getBoundingClientRect();
           for (let count = 1; count <= domClickCount; count += 1) {
-            const common = { bubbles: true, composed: true, cancelable: true, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2,
+            const common = { bubbles: true, composed: true, cancelable: true, clientX: result.first.x, clientY: result.first.y,
               button: domClickButton, detail: count, ...domClickModifiers };
             first.dispatchEvent(new MouseEvent('mousedown', common));
             first.dispatchEvent(new MouseEvent('mouseup', common));
@@ -2837,7 +2957,26 @@ export class DesktopBrowserService extends EventEmitter {
           const nextValue = operation === 'fill' ? domInput : (editableValue(first) || '') + domInput;
           if (!setEditableValue(first, nextValue)) return { ...result, error: 'Locator does not resolve to an editable element' };
           if (operation === 'fill') first.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          if (!first.isConnected || editableValue(first) !== nextValue) return { ...result, error: '输入后目标内容与请求不符，操作未完成。' };
           result.domAction = operation;
+        }
+        if ((operation === 'fill' || operation === 'type') && domInput === undefined && elements.length === 1) {
+          if (!visible(first) || !enabled(first) || first.readOnly || first.getAttribute('aria-readonly') === 'true') {
+            return { ...result, error: 'Locator 目标不可编辑。' };
+          }
+          if (editableValue(first) === undefined || typeof first.focus !== 'function') return { ...result, error: 'Locator 目标不是可编辑元素。' };
+          first.focus();
+          let active = document.activeElement;
+          while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+          if (active !== first) return { ...result, error: 'Locator 输入目标未获得焦点。' };
+        }
+        if (operation === 'press' && domKey === undefined && elements.length === 1) {
+          if (!visible(first) || !enabled(first) || typeof first.focus !== 'function') return { ...result, error: 'Locator 按键目标不可聚焦。' };
+          first.focus();
+          let active = document.activeElement;
+          while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+          if (active !== first) return { ...result, error: 'Locator 按键目标未获得焦点。' };
         }
         if (operation === 'press-sequentially' && typeof domInput === 'string' && elements.length === 1) {
           if (!visible(first)) return { ...result, error: 'Locator resolves to a hidden element' };
@@ -2846,6 +2985,8 @@ export class DesktopBrowserService extends EventEmitter {
           for (const character of domInput) {
             const current = editableValue(first) || '';
             if (!setEditableValue(first, current + character)) return { ...result, error: 'Unable to type sequentially into this element' };
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            if (!first.isConnected || editableValue(first) !== current + character) return { ...result, error: '逐字输入后目标内容不符，操作未完成。' };
           }
           result.domAction = 'type';
         }
@@ -2859,6 +3000,9 @@ export class DesktopBrowserService extends EventEmitter {
           if (!enabled(first)) return { ...result, error: 'Locator resolves to a disabled element' };
           if (typeof first.focus !== 'function') return { ...result, error: 'Locator does not resolve to a focusable element' };
           first.focus();
+          let active = document.activeElement;
+          while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+          if (active !== first) return { ...result, error: 'Locator 目标未获得焦点。' };
           result.domAction = 'focus';
         }
         if (operation === 'set-checked' && typeof domChecked === 'boolean' && elements.length === 1) {
@@ -2930,11 +3074,18 @@ export class DesktopBrowserService extends EventEmitter {
     const timeoutMs = request.timeoutMs === undefined ? 5_000 : positiveInteger(request.timeoutMs, 'timeoutMs', 250, 30_000)
     const deadline = Date.now() + timeoutMs
     let previous: BrowserLocatorMatch | undefined
+    let blockedReason: string | undefined
     while (Date.now() <= deadline) {
-      const resolution = await this.resolveLocator(tab, plan, 'wait-for', request)
+      const resolution = await this.resolveLocator(tab, plan, operation === 'click' ? 'prepare-click' : 'wait-for', request)
       if (resolution.count > 1) throw new Error(`Locator 严格模式失败：匹配到 ${String(resolution.count)} 个元素。`)
       const match = resolution.first
-      if (resolution.count === 1 && match !== undefined && match.visible && match.enabled) {
+      const hitReady = operation !== 'click' || match?.hitTarget === true
+      blockedReason = resolution.count === 0 || match === undefined ? '未找到匹配元素'
+        : !match.visible ? '目标当前隐藏或没有可见区域'
+          : !match.enabled ? '目标已禁用'
+            : !hitReady ? match.inViewport ? '目标被遮挡，无法接收点击' : '滚动后目标仍位于可点击视口外'
+              : undefined
+      if (resolution.count === 1 && match !== undefined && match.visible && match.enabled && hitReady) {
         const stable = previous !== undefined
           && Math.abs(previous.x - match.x) < 0.75
           && Math.abs(previous.y - match.y) < 0.75
@@ -2947,7 +3098,7 @@ export class DesktopBrowserService extends EventEmitter {
       }
       await new Promise<void>((resolve) => setTimeout(resolve, 75))
     }
-    throw new Error(`等待 Locator 可操作超时（${String(timeoutMs)}ms）。`)
+    throw new Error(`等待 Locator 可操作超时（${String(timeoutMs)}ms）${blockedReason === undefined ? '。' : `：${blockedReason}。`}`)
   }
 
   private async locatorAction(tab: BrowserTabRuntime, request: DesktopBrowserAgentRequest): Promise<Record<string, unknown>> {
@@ -3001,10 +3152,10 @@ export class DesktopBrowserService extends EventEmitter {
     if (resolution.domAction === operation || (operation === 'press-sequentially' && resolution.domAction === 'type')) {
       this.invalidateTabSnapshot(tab)
       if (operation === 'click') {
-        return { ok: true, tabId: tab.id, operation, clickCount: request.clickCount ?? 1, method: 'dom' }
+        return { ok: true, tabId: tab.id, operation, clickCount: request.clickCount ?? 1, method: 'dom', hitVerified: true }
       }
-      if (operation === 'fill' || operation === 'type') return { ok: true, tabId: tab.id, operation, characters: String(request.value).length, method: 'dom' }
-      if (operation === 'press-sequentially') return { ok: true, tabId: tab.id, operation, characters: String(request.value).length, method: 'dom' }
+      if (operation === 'fill' || operation === 'type') return { ok: true, tabId: tab.id, operation, characters: String(request.value).length, method: 'dom', inputVerified: true }
+      if (operation === 'press-sequentially') return { ok: true, tabId: tab.id, operation, characters: String(request.value).length, method: 'dom', inputVerified: true }
       if (operation === 'press') return { ok: true, tabId: tab.id, operation, key: request.key, method: 'dom' }
       if (operation === 'focus') return { ok: true, tabId: tab.id, operation, method: 'dom' }
       if (operation === 'set-checked') return { ok: true, tabId: tab.id, operation, checked: resolution.checked, method: 'dom' }
@@ -3014,11 +3165,10 @@ export class DesktopBrowserService extends EventEmitter {
       return { ...result, operation }
     }
     if (operation === 'fill' || operation === 'type') {
-      const result = await this.typeText(tab, { x: match.x, y: match.y, text: request.value, clear: operation === 'fill' })
+      const result = await this.typeText(tab, { text: request.value, clear: operation === 'fill' })
       return { ...result, operation }
     }
     if (operation === 'press') {
-      await this.click(tab, { x: match.x, y: match.y })
       const result = await this.pressKey(tab, { key: request.key })
       return { ...result, operation }
     }
@@ -3204,8 +3354,51 @@ export class DesktopBrowserService extends EventEmitter {
     return { ok: true, tabId: tab.id, values: result.values, labels: result.labels }
   }
 
-  private async click(tab: BrowserTabRuntime, request: DesktopBrowserAgentRequest): Promise<Record<string, unknown>> {
+  private async pointerTarget(tab: BrowserTabRuntime, request: DesktopBrowserAgentRequest): Promise<{ x: number; y: number }> {
     const target = targetFromRequest(tab, request)
+    if (typeof request.ref === 'number') {
+      const deadline = Date.now() + 5_000
+      let previous: { x: number; y: number } | undefined
+      let reason = '元素不在可点击视口内'
+      while (Date.now() < deadline) {
+        const response = await this.debuggerCommandFor(tab, 'Runtime.evaluate', {
+          expression: `(() => {
+            const element = globalThis[Symbol.for('dfy-dsh-desktop.browser.snapshot-refs')]?.elements.get(${String(request.ref)})?.deref();
+            if (!element?.isConnected) return { stale: true };
+            element.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
+            ${BROWSER_HIT_TARGET_HELPERS}
+            return clickablePoint(element);
+          })()`,
+          returnByValue: true,
+        }) as { result?: { value?: { stale?: boolean; x?: number; y?: number; hitTarget?: boolean; inViewport?: boolean } } }
+        const point = response.result?.value
+        if (point?.stale) throw new Error('这个元素引用已失效，请重新获取网页快照。')
+        if (point?.hitTarget && typeof point.x === 'number' && typeof point.y === 'number') {
+          if (previous !== undefined && Math.abs(previous.x - point.x) < 0.75 && Math.abs(previous.y - point.y) < 0.75) return { x: point.x, y: point.y }
+          previous = { x: point.x, y: point.y }
+        } else {
+          previous = undefined
+          reason = point?.inViewport ? '元素被遮挡，无法接收点击' : '滚动后元素仍在可点击视口外'
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 75))
+      }
+      throw new Error(`无法操作这个元素引用：${reason}。`)
+    }
+    const response = await this.debuggerCommandFor(tab, 'Runtime.evaluate', {
+      expression: `(() => {
+        const x = ${JSON.stringify(target.x)}, y = ${JSON.stringify(target.y)}, viewport = visualViewport;
+        const left = viewport?.offsetLeft ?? 0, top = viewport?.offsetTop ?? 0;
+        if (x < left || y < top || x >= left + (viewport?.width ?? innerWidth) || y >= top + (viewport?.height ?? innerHeight)) return false;
+        return document.elementFromPoint(x, y) !== null;
+      })()`,
+      returnByValue: true,
+    }) as { result?: { value?: unknown } }
+    if (response.result?.value !== true) throw new Error('指定坐标位于当前可点击视口外，或没有可接收事件的元素。')
+    return target
+  }
+
+  private async click(tab: BrowserTabRuntime, request: DesktopBrowserAgentRequest): Promise<Record<string, unknown>> {
+    const target = await this.pointerTarget(tab, request)
     const clickCount = request.clickCount === undefined ? 1 : positiveInteger(request.clickCount, 'clickCount', 1, 3)
     const button = mouseButton(request.button)
     const modifiers = inputModifierState(request.keypress ?? request.modifiers)
@@ -3218,8 +3411,8 @@ export class DesktopBrowserService extends EventEmitter {
           const x = ${JSON.stringify(target.x)}, y = ${JSON.stringify(target.y)}, clickCount = ${String(clickCount)};
           const button = ${String(button.dom)}, modifiers = ${JSON.stringify(modifiers)};
           const element = document.elementFromPoint(x, y);
-          if (!(element instanceof HTMLElement)) return false;
-          element.focus({ preventScroll: true });
+          if (!(element instanceof Element)) return false;
+          element.focus?.({ preventScroll: true });
           element.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, composed: true, clientX: x, clientY: y, ...modifiers }));
           for (let count = 1; count <= clickCount; count += 1) {
             const common = { bubbles: true, composed: true, cancelable: true, clientX: x, clientY: y, button, detail: count, ...modifiers };
@@ -3235,7 +3428,7 @@ export class DesktopBrowserService extends EventEmitter {
       }) as { result?: { value?: unknown } }
       if (response.result?.value !== true) throw new Error('坐标处没有可点击的网页元素。')
       this.invalidateTabSnapshot(tab)
-      return { ok: true, tabId: tab.id, x: Math.round(target.x), y: Math.round(target.y), clickCount, button: button.cdp, method: 'dom' }
+      return { ok: true, tabId: tab.id, x: Math.round(target.x), y: Math.round(target.y), clickCount, button: button.cdp, method: 'dom', hitVerified: true }
     }
     if (button.cdp === 'left') await this.pointer(tab, target.x, target.y, false)
     await this.debuggerCommandFor(tab, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: target.x, y: target.y, modifiers: modifiers.mask })
@@ -3247,7 +3440,7 @@ export class DesktopBrowserService extends EventEmitter {
     }
     if (button.cdp === 'left') await this.pointer(tab, target.x, target.y, false)
     this.invalidateTabSnapshot(tab)
-    return { ok: true, tabId: tab.id, x: Math.round(target.x), y: Math.round(target.y), clickCount, button: button.cdp }
+    return { ok: true, tabId: tab.id, x: Math.round(target.x), y: Math.round(target.y), clickCount, button: button.cdp, hitVerified: true }
   }
 
   private async drag(tab: BrowserTabRuntime, request: DesktopBrowserAgentRequest): Promise<Record<string, unknown>> {
@@ -3333,44 +3526,50 @@ export class DesktopBrowserService extends EventEmitter {
   private async typeText(tab: BrowserTabRuntime, request: DesktopBrowserAgentRequest): Promise<Record<string, unknown>> {
     if (typeof request.text !== 'string') throw new Error('text 是必填项。')
     if (request.ref !== undefined || request.x !== undefined || request.y !== undefined) await this.click(tab, request)
-    if (!tab.view.getVisible()) {
-      const response = await this.debuggerCommandFor(tab, 'Runtime.evaluate', {
-        expression: `(() => {
-          const element = document.activeElement;
-          const text = ${JSON.stringify(request.text)}, clear = ${String(request.clear === true)};
-          if (!(element instanceof HTMLElement)) return false;
-          if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
-            if (element instanceof HTMLInputElement && ['button','checkbox','color','file','hidden','image','radio','range','reset','submit'].includes(element.type)) return false;
+    const contents = tab.view.webContents
+    const frame = contents.focusedFrame ?? contents.mainFrame
+    const key = JSON.stringify(`dfy-browser-input:${randomUUID()}`)
+    const slot = `globalThis[Symbol.for(${key})]`
+    const text = request.text
+    const clear = request.clear === true
+    const dom = !tab.view.getVisible()
+    try {
+      const preparation = await frame.executeJavaScript(`(() => {
+        const element = ${ACTIVE_INPUT_EXPRESSION};
+        const result = (${PREPARE_BROWSER_INPUT}).call(element, ${JSON.stringify(text)}, ${String(clear)});
+        if (result.error) return result;
+        ${slot} = { element, ...result };
+        return { ready: true };
+      })()`) as { ready?: boolean; error?: string }
+      if (preparation.error !== undefined) throw new Error(preparation.error)
+      if (preparation.ready !== true) throw new Error('无法准备输入目标。')
+      if (dom) {
+        await frame.executeJavaScript(`(() => {
+          const { element, expected, kind } = ${slot};
+          if (kind === 'value') {
             const prototype = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
             const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
-            const next = clear ? text : element.value.slice(0, element.selectionStart ?? element.value.length) + text + element.value.slice(element.selectionEnd ?? element.value.length);
-            if (setter) setter.call(element, next); else element.value = next;
-            element.setSelectionRange?.(next.length, next.length);
-          } else if (element.isContentEditable) {
-            element.textContent = clear ? text : (element.textContent || '') + text;
-          } else return false;
-          element.dispatchEvent(typeof InputEvent === 'function' ? new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText', data: text }) : new Event('input', { bubbles: true }));
-          if (clear) element.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-          return true;
-        })()`,
-        returnByValue: true,
-      }) as { result?: { value?: unknown } }
-      if (response.result?.value !== true) throw new Error('当前焦点元素不可输入文本。')
+            if (setter) setter.call(element, expected); else element.value = expected;
+            try { element.setSelectionRange(expected.length, expected.length); } catch {}
+          } else element.textContent = expected;
+          element.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText', data: ${JSON.stringify(text)} }));
+        })()`)
+      } else if (clear && text.length === 0) {
+        await this.debuggerCommandFor(tab, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 })
+        await this.debuggerCommandFor(tab, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 })
+      } else {
+        await this.debuggerCommandFor(tab, 'Input.insertText', { text })
+      }
+      const verified = await frame.executeJavaScript(`(() => {
+        const { element, expected, kind } = ${slot};
+        return (${VERIFY_BROWSER_INPUT}).call(element, expected, kind);
+      })()`)
       this.invalidateTabSnapshot(tab)
-      return { ok: true, tabId: tab.id, characters: request.text.length, method: 'dom' }
+      if (verified !== true) throw new Error('输入后目标内容与请求不符，操作未完成。')
+      return { ok: true, tabId: tab.id, characters: text.length, inputVerified: true, ...(dom ? { method: 'dom' } : {}) }
+    } finally {
+      if (!frame.isDestroyed()) await frame.executeJavaScript(`delete ${slot}`).catch(() => undefined)
     }
-    if (request.clear === true) {
-      const modifier = process.platform === 'darwin' ? 4 : 2
-      const key = process.platform === 'darwin' ? 'Meta' : 'Control'
-      const code = process.platform === 'darwin' ? 'MetaLeft' : 'ControlLeft'
-      await this.debuggerCommandFor(tab, 'Input.dispatchKeyEvent', { type: 'keyDown', key, code, modifiers: modifier })
-      await this.debuggerCommandFor(tab, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: modifier })
-      await this.debuggerCommandFor(tab, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: modifier })
-      await this.debuggerCommandFor(tab, 'Input.dispatchKeyEvent', { type: 'keyUp', key, code, modifiers: modifier })
-    }
-    await this.debuggerCommandFor(tab, 'Input.insertText', { text: request.text })
-    this.invalidateTabSnapshot(tab)
-    return { ok: true, tabId: tab.id, characters: request.text.length }
   }
 
   private async scroll(tab: BrowserTabRuntime, request: DesktopBrowserAgentRequest): Promise<Record<string, unknown>> {
@@ -3466,21 +3665,10 @@ export class DesktopBrowserService extends EventEmitter {
     scrollX: number
     scrollY: number
   }> {
-    const metrics = await this.debuggerCommandFor(tab, 'Page.getLayoutMetrics') as {
-      cssVisualViewport?: { pageX?: unknown; pageY?: unknown; clientWidth?: unknown; clientHeight?: unknown }
-      cssLayoutViewport?: { pageX?: unknown; pageY?: unknown; clientWidth?: unknown; clientHeight?: unknown }
-    }
-    const viewport = metrics.cssVisualViewport ?? metrics.cssLayoutViewport
-    if (viewport !== undefined
-      && typeof viewport.clientWidth === 'number' && Number.isFinite(viewport.clientWidth) && viewport.clientWidth > 0
-      && typeof viewport.clientHeight === 'number' && Number.isFinite(viewport.clientHeight) && viewport.clientHeight > 0) {
-      return {
-        width: viewport.clientWidth,
-        height: viewport.clientHeight,
-        scrollX: typeof viewport.pageX === 'number' && Number.isFinite(viewport.pageX) ? viewport.pageX : 0,
-        scrollY: typeof viewport.pageY === 'number' && Number.isFinite(viewport.pageY) ? viewport.pageY : 0,
-      }
-    }
+    // capturePage includes scrollbars. CDP's layout/visual viewport client sizes
+    // exclude them, so using those sizes skews every screenshot coordinate.
+    // innerWidth/innerHeight describe the full surface in page CSS pixels and
+    // already account for page zoom; the PNG supplies the image pixel density.
     const response = await this.debuggerCommandFor(tab, 'Runtime.evaluate', {
       expression: '({ width: innerWidth, height: innerHeight, scrollX, scrollY })',
       returnByValue: true,
@@ -3510,6 +3698,7 @@ export class DesktopBrowserService extends EventEmitter {
     let png: Buffer
     let size: Electron.Size
     let rect: CssScreenshotRect | undefined
+    let capturedCssRect: CssScreenshotRect = { x: 0, y: 0, width: viewport.width, height: viewport.height }
     try {
       const captured = capture.image
       if (captured.isEmpty()) throw new Error('网页截图失败：当前视口没有可捕获的图像。')
@@ -3524,6 +3713,14 @@ export class DesktopBrowserService extends EventEmitter {
           height: plan.crop.height,
         })
         rect = plan.rect
+        // Cropping rounds to image boundaries. Report the actual captured CSS
+        // region so coordinates also map correctly near a fractional crop edge.
+        capturedCssRect = {
+          x: plan.crop.x / plan.scaleX,
+          y: plan.crop.y / plan.scaleY,
+          width: plan.crop.width / plan.scaleX,
+          height: plan.crop.height / plan.scaleY,
+        }
       }
       if (image.isEmpty()) throw new Error('网页截图失败：裁剪后的区域为空。')
       size = image.getSize()
@@ -3536,6 +3733,10 @@ export class DesktopBrowserService extends EventEmitter {
       // resulting Buffer survives host teardown and is shared by cache + registry.
       try {
         png = image.toPNG()
+        // NativeImage sizes can use DIP while the selected PNG representation
+        // has a different pixel density. Coordinates refer to the encoded image.
+        if (png.length < 24) throw new Error('PNG 缺少尺寸信息。')
+        size = { width: png.readUInt32BE(16), height: png.readUInt32BE(20) }
       } catch (error) {
         throw new Error(`网页截图失败（toPNG）：${error instanceof Error ? error.message : String(error)}`)
       }
@@ -3551,6 +3752,14 @@ export class DesktopBrowserService extends EventEmitter {
       ...(rect === undefined ? {} : { rect }),
       scrollX: viewport.scrollX,
       scrollY: viewport.scrollY,
+      viewportWidth: viewport.width,
+      viewportHeight: viewport.height,
+      coordinateMapping: {
+        originX: capturedCssRect.x,
+        originY: capturedCssRect.y,
+        cssPixelsPerImagePixelX: capturedCssRect.width / size.width,
+        cssPixelsPerImagePixelY: capturedCssRect.height / size.height,
+      },
     })
     return { ok: true, tabId: tab.id, url: result.sourceUrl, ...result }
   }
@@ -3656,7 +3865,7 @@ export class DesktopBrowserService extends EventEmitter {
       delete tab.viewport
       tab.backgroundViewportActive = false
       const contents = tab.view.webContents
-      if (contents.debugger.isAttached()) await contents.debugger.sendCommand('Emulation.clearDeviceMetricsOverride').catch(() => undefined)
+      if (contents.debugger.isAttached()) await this.sendDebuggerCommand(contents, 'Emulation.clearDeviceMetricsOverride')
       if (this.activeTabId === tab.id) await this.setDeviceViewport(null)
       return { ok: true, tabId: tab.id, viewport: null }
     }
@@ -3684,7 +3893,7 @@ export class DesktopBrowserService extends EventEmitter {
     const tab = this.activeTab()
     if (viewport === undefined) {
       const contents = this.view.webContents
-      if (contents.debugger.isAttached()) await contents.debugger.sendCommand('Emulation.clearDeviceMetricsOverride').catch(() => undefined)
+      if (contents.debugger.isAttached()) await this.sendDebuggerCommand(contents, 'Emulation.clearDeviceMetricsOverride')
       if (tab !== undefined) tab.backgroundViewportActive = false
       return
     }

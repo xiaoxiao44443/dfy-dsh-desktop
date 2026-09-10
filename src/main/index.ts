@@ -19,6 +19,9 @@ import { DesktopRendererHost } from './desktop-renderer-host.js'
 import { DesktopUpdateService } from './desktop-update.js'
 import { SessionFormatCompatibilityError } from './session-format-compat.js'
 import { DesktopTray } from './desktop-tray.js'
+import { handleNotificationProtocolArguments, notificationProtocolScheme } from './notification-protocol.js'
+import { ensureWindowsNotificationProtocol } from './windows-notification-protocol.js'
+import { DESKTOP_NOTIFICATION_APP_ID } from './windows-notification-history.js'
 
 // Chromium may not propagate macOS' dark color-scheme media query into the
 // cross-origin Harness iframe. Preserve explicit Harness light/dark choices,
@@ -37,7 +40,7 @@ if (macSystemDark) {
 }
 
 app.setName('DFY DSH Desktop')
-if (process.platform === 'win32') app.setAppUserModelId('com.saltfish.dfy-dsh-desktop')
+if (process.platform === 'win32') app.setAppUserModelId(DESKTOP_NOTIFICATION_APP_ID)
 
 const desktopDataRoot = join(app.getPath('home'), '.saltfish')
 const desktopUserDataPath = join(
@@ -94,7 +97,9 @@ if (!app.requestSingleInstanceLock()) {
   let rendererHost: DesktopRendererHost | undefined
   let desktopUpdates: DesktopUpdateService | undefined
   let tray: DesktopTray | undefined
+  let notifications: DesktopNotificationService | undefined
   let quitting = false
+  const notificationScheme = notificationProtocolScheme(app.isPackaged)
 
   const showMainWindow = async (): Promise<void> => {
     if (quitting) return
@@ -103,7 +108,15 @@ if (!app.requestSingleInstanceLock()) {
     if (window !== undefined) tray?.attachWindow(window)
   }
   const reopen = (): void => { void showMainWindow().catch((error) => debugError('[desktop] reopen failed', error)) }
-  app.on('second-instance', reopen)
+  app.on('second-instance', (_event, commandLine) => {
+    if (process.platform === 'win32' && handleNotificationProtocolArguments(
+      commandLine, notificationScheme, (url) => notifications?.handleProtocolActivation(url),
+    )) {
+      debugLog('[desktop] notification protocol activation received')
+      return
+    }
+    reopen()
+  })
   app.on('before-quit', () => {
     quitting = true
     tray?.dispose()
@@ -289,12 +302,33 @@ if (!app.requestSingleInstanceLock()) {
     const desktopBrowserPluginRoot = app.isPackaged
       ? join(process.resourcesPath, 'dsh-desktop-browser')
       : join(app.getAppPath(), 'resources', 'dsh-desktop-browser')
-    const notifications = new DesktopNotificationService(
+    let notificationProtocolReady = false
+    if (process.platform === 'win32') {
+      try {
+        const protocolArgs = app.isPackaged ? [] : [app.getAppPath()]
+        notificationProtocolReady = app.setAsDefaultProtocolClient(
+          notificationScheme, process.execPath, protocolArgs,
+        )
+        if (notificationProtocolReady) notificationProtocolReady = await ensureWindowsNotificationProtocol({
+          scheme: notificationScheme, executablePath: process.execPath, args: protocolArgs,
+        })
+        if (!notificationProtocolReady) debugError('[desktop] notification protocol registration unavailable')
+      } catch (error) {
+        debugError('[desktop] notification protocol registration failed', error)
+      }
+    }
+    notifications = new DesktopNotificationService(
       join(app.getPath('userData'), 'notifications.json'),
       {
         getWindow: () => windows?.getBrowserWindow(),
         openSession: (sessionId) => windows?.focusHarnessSession(sessionId),
+        answerApproval: async (request, decision) => {
+          const result = windows === undefined ? 'expired' : await windows.answerNotificationApproval(request, decision)
+          debugLog('[desktop] notification approval action result', result)
+          return result
+        },
       },
+      notificationProtocolReady ? notificationScheme : process.platform === 'win32' ? null : undefined,
     )
     await notifications.initialize()
     desktopBridge = new HarnessDesktopBridgeHost({

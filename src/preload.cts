@@ -61,6 +61,7 @@ const bridge: DesktopBridge = {
   setBrowserPanelOpen: (open: boolean) => ipcRenderer.invoke('desktop:browser-panel-open', open) as Promise<void>,
   setBrowserDisplayMode: (mode: BrowserDisplayMode) => ipcRenderer.invoke('desktop:browser-display-mode', mode) as Promise<void>,
   openBrowserMenu: (kind: BrowserMenuKind, anchor: DesktopBrowserMenuAnchor) => ipcRenderer.invoke('desktop:browser-open-menu', kind, anchor) as Promise<void>,
+  claimShellMenu: () => ipcRenderer.invoke('desktop:claim-shell-menu') as Promise<void>,
   setBrowserZoomFactor: (factor: number) => ipcRenderer.invoke('desktop:browser-zoom-factor', factor) as Promise<void>,
   setBrowserDeviceViewport: (viewport: DesktopBrowserViewport | null) => ipcRenderer.invoke('desktop:browser-device-viewport', viewport) as Promise<void>,
   previewBrowserDeviceViewport: (viewport: DesktopBrowserViewport) => ipcRenderer.invoke('desktop:browser-device-preview', viewport) as Promise<void>,

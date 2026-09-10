@@ -30,7 +30,8 @@ body {
   background: transparent;
 }
 
-body { padding: 28px; }
+/* Match MENU_SHADOW_PADDING: leave room for the downward shadow to fade out. */
+body { padding: 56px; }
 
 #root {
   width: 100%;

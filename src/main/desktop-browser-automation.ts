@@ -8,6 +8,7 @@ import type {
   SnapshotTarget,
 } from './desktop-browser-types.js'
 import { finiteCoordinate, positiveInteger } from './desktop-browser-utils.js'
+import { normalizeBrowserPageUrl } from '../shared/browser-address.js'
 
 export type BrowserDebuggerCommand = (
   tab: BrowserTabRuntime,
@@ -29,11 +30,12 @@ export interface BrowserNavigationState {
   networkActivityVersion?: number
   networkIdleMs: number
   kind: 'document' | 'same-document'
+  failure?: { url: string; message: string; at: number }
 }
 
 export interface BrowserNavigationOutcome {
-  status: 'success' | 'no-op' | 'timeout'
-  reason?: 'no-navigation' | 'expected-url' | 'unstable-page'
+  status: 'success' | 'no-op' | 'timeout' | 'failed'
+  reason?: 'no-navigation' | 'expected-url' | 'unstable-page' | 'navigation-failed'
   state: BrowserNavigationState
   elapsedMs: number
 }
@@ -230,18 +232,17 @@ function urlPatternMatches(expected: string | undefined, actual: string): boolea
   return new RegExp(`^${escaped}$`, 'u').test(actual)
 }
 
-function navigationSignature(state: BrowserNavigationState): string {
+function navigationSignature(state: BrowserNavigationState, includeNetwork: boolean): string {
   return [
     state.url,
     state.readyState,
     String(state.loading),
-    String(state.inflightRequests),
-    String(state.networkActivityVersion ?? 0),
+    ...(includeNetwork ? [String(state.inflightRequests), String(state.networkActivityVersion ?? 0)] : []),
   ].join('\u0000')
 }
 
 function commitNavigationState(tab: BrowserTabRuntime, state: BrowserNavigationState): void {
-  tab.url = /^https?:\/\//iu.test(state.url) ? state.url : ''
+  tab.url = normalizeBrowserPageUrl(state.url) ?? ''
   tab.title = state.title || tab.view.webContents.getTitle().trim() || tab.url || '浏览器'
 }
 
@@ -277,6 +278,7 @@ export async function readNavigationState(
     networkActivityVersion: tab.networkActivityVersion ?? 0,
     networkIdleMs: tab.inflightRequests.size === 0 ? Math.max(0, Date.now() - tab.networkIdleSince) : 0,
     kind: tab.lastNavigationKind,
+    ...(tab.lastNavigationFailure === undefined ? {} : { failure: tab.lastNavigationFailure }),
   }
 }
 
@@ -300,6 +302,11 @@ export async function waitForNavigationStability(
   while (Date.now() <= deadline) {
     latest = await readNavigationState(tab, debuggerCommand)
     const now = Date.now()
+    if (latest.failure !== undefined && (latest.failure.at !== before.failure?.at
+      || (!options.requireNavigation && options.expectedUrl !== undefined && !urlPatternMatches(options.expectedUrl, latest.url)
+        && urlPatternMatches(options.expectedUrl, latest.failure.url)))) {
+      return { status: 'failed', reason: 'navigation-failed', state: latest, elapsedMs: now - startedAt }
+    }
     const changed = latest.version > before.version || latest.url !== before.url || latest.loading
     if (detectedAt === undefined && (changed || options.acceptCurrent === true)) detectedAt = now
     if (detectedAt === undefined) {
@@ -333,7 +340,7 @@ export async function waitForNavigationStability(
           && now - networkQuietSince >= 500
         : latest.readyState === 'complete' && !latest.loading
     const ready = urlReady && documentReady
-    const signature = navigationSignature(latest)
+    const signature = navigationSignature(latest, options.waitUntil === 'networkidle')
     if (ready) {
       if (signature !== stableSignature) {
         stableSignature = signature
@@ -351,7 +358,7 @@ export async function waitForNavigationStability(
 
   return {
     status: 'timeout',
-    reason: matchedExpectedUrl ? 'unstable-page' : 'expected-url',
+    reason: detectedAt === undefined ? 'no-navigation' : matchedExpectedUrl ? 'unstable-page' : 'expected-url',
     state: latest,
     elapsedMs: Date.now() - startedAt,
   }
@@ -391,7 +398,10 @@ export async function waitForNavigation(
   if (!['commit', 'domcontentloaded', 'load', 'networkidle'].includes(String(waitUntil))) {
     throw new Error('waitUntil 必须是 commit、domcontentloaded、load 或 networkidle。')
   }
-  const current = await readNavigationState(tab, debuggerCommand)
+  const current = await readNavigationState(tab, debuggerCommand).catch((error: unknown) => {
+    throw new Error(navigationFailureMessage(tab.url, typeof expectedUrl === 'string' ? expectedUrl : undefined,
+      error instanceof Error ? error.message : String(error)), { cause: error })
+  })
   const supplied = request.before
   let before: BrowserNavigationState
   if (supplied !== undefined) {
@@ -411,6 +421,8 @@ export async function waitForNavigation(
       networkActivityVersion: typeof value.networkActivityVersion === 'number' ? value.networkActivityVersion : 0,
       networkIdleMs: typeof value.networkIdleMs === 'number' ? value.networkIdleMs : 0,
       kind: value.kind === 'same-document' ? 'same-document' : 'document',
+      ...(value.failure !== undefined && value.failure !== null && typeof value.failure.url === 'string' && typeof value.failure.message === 'string'
+        && typeof value.failure.at === 'number' && Number.isFinite(value.failure.at) ? { failure: value.failure } : {}),
     }
   } else {
     before = { ...current, version: afterVersion ?? current.version }
@@ -421,7 +433,10 @@ export async function waitForNavigation(
     ...(typeof expectedUrl === 'string' ? { expectedUrl } : {}),
     requireNavigation,
     acceptCurrent: !requireNavigation,
-  }, debuggerCommand)
+  }, debuggerCommand).catch((error: unknown) => {
+    throw new Error(navigationFailureMessage(tab.url, typeof expectedUrl === 'string' ? expectedUrl : undefined,
+      error instanceof Error ? error.message : String(error)), { cause: error })
+  })
   if (outcome.status === 'success') {
     return {
       ok: true,
@@ -433,17 +448,26 @@ export async function waitForNavigation(
       elapsedMs: outcome.elapsedMs,
     }
   }
-  const target = expectedUrl === undefined
-    ? (requireNavigation ? '下一次导航' : '页面状态')
-    : `URL ${expectedUrl}`
-  const pending = [...tab.inflightRequestDetails?.values() ?? []]
-    .slice(0, 3)
-    .map((entry) => `${entry.type}:${entry.url}`)
-  const pendingSummary = pending.length === 0 ? '' : `，未完成请求：${pending.join(', ')}`
-  const networkSummary = waitUntil !== 'networkidle'
-    ? ''
-    : `，网络：${outcome.state.inflightRequests} 个请求 / 空闲 ${Math.round(outcome.state.networkIdleMs)}ms`
-  throw new Error(`等待${target}超时（${String(timeoutMs)}ms，状态：${outcome.status}，原因：${String(outcome.reason)}${networkSummary}${pendingSummary}）。`)
+  const reason = outcome.reason === 'navigation-failed' ? outcome.state.failure?.message ?? '页面加载失败'
+    : outcome.reason === 'no-navigation' ? '未观察到新导航'
+      : outcome.reason === 'expected-url' ? '当前 URL 未匹配预期 URL'
+        : waitUntil === 'networkidle' ? `网络尚未空闲（${outcome.state.inflightRequests} 个未完成请求，空闲 ${Math.round(outcome.state.networkIdleMs)}ms）`
+          : outcome.state.loading || outcome.state.readyState !== 'complete' ? '页面仍在加载' : '页面状态尚未稳定'
+  throw new Error(navigationFailureMessage(outcome.state.url, typeof expectedUrl === 'string' ? expectedUrl : undefined,
+    reason, outcome.status === 'failed' ? '导航失败' : `等待${requireNavigation ? '导航' : 'URL/页面状态'}超时（${timeoutMs}ms，${String(waitUntil)}）`))
+}
+
+export function navigationFailureMessage(currentUrl: string, expectedUrl: string | undefined, reason: string, title = '导航失败'): string {
+  const compact = (value: string, limit: number): string => {
+    const text = value.replace(/[\r\n]+/gu, ' ').trim()
+    return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`
+  }
+  const explanation = reason === 'no-navigation' ? '未观察到新导航'
+    : reason === 'expected-url' ? '当前 URL 未匹配预期 URL'
+      : reason === 'unstable-page' ? '页面状态尚未稳定' : reason
+  return `${title}。当前 URL：${compact(currentUrl, 400) || '(空白)'}。`
+    + (expectedUrl === undefined ? '' : `预期 URL：${compact(expectedUrl, 400)}。`)
+    + `原因：${compact(explanation, 300)}。`
 }
 
 export async function evaluatePage(

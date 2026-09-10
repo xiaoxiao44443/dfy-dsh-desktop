@@ -3,6 +3,30 @@
 
 !ifdef BUILD_UNINSTALLER
 
+!macro customUnInstall
+  Push $0
+  ClearErrors
+  ReadRegStr $0 HKCU "Software\Classes\dfy-dsh-notification\shell\open\command" ""
+  # Only remove the exact packaged-app command registered by Electron.
+  # A different installation, custom command, or development handler stays intact.
+  ${If} $0 == '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" "%1"'
+    DeleteRegKey HKCU "Software\Classes\dfy-dsh-notification"
+  ${EndIf}
+  # The elevated runtime uses reg.exe /reg:64 for its machine-level fallback.
+  ${If} ${RunningX64}
+    SetRegView 64
+    ClearErrors
+    ReadRegStr $0 HKLM "Software\Classes\dfy-dsh-notification\shell\open\command" ""
+    ${If} $0 == '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" "%1"'
+      DeleteRegKey HKLM "Software\Classes\dfy-dsh-notification"
+    ${EndIf}
+    SetRegView lastused
+  ${EndIf}
+  Pop $0
+  # Missing keys or denied machine-level access must not interrupt uninstall.
+  ClearErrors
+!macroend
+
 Var DeleteDesktopDataCheckbox
 
 Function un.DesktopDataPageCreate

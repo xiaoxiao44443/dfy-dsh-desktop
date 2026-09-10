@@ -4,7 +4,7 @@ import {
   parsePluginContextMenuCollection,
   sanitizeContextMenuEntries,
 } from '../src/shared/context-menu.js'
-import { appendPluginContextMenuItems, buildBuiltinContextMenuItems } from '../src/main/context-menu.js'
+import { appendPluginContextMenuItems, BUILTIN_CONTEXT_MENU_ACTIONS, buildBuiltinContextMenuItems } from '../src/main/context-menu.js'
 
 describe('desktop context menu protocol', () => {
   it('sanitizes entries and collapses invalid separators', () => {
@@ -198,6 +198,22 @@ describe('desktop context menu protocol', () => {
       }, { platform })
       expect(items.map((item) => item.id)).toEqual(['desktop.copy-image', 'desktop.save-image'])
     }
+  })
+
+  it.each(['none', 'image', 'canvas'] as const)('only includes inspect for explicitly enabled page menus with %s content', (mediaType) => {
+    const snapshot = {
+      isEditable: false, selectionText: '', linkURL: '', mediaType, hasImageContents: true,
+      editFlags: { canUndo: false, canRedo: false, canCut: false, canCopy: false,
+        canPaste: false, canDelete: false, canSelectAll: true, canEditRichly: false },
+    }
+    for (const options of [{}, { embeddedBrowserEnabled: true }, { inspectElementEnabled: false }]) {
+      expect(buildBuiltinContextMenuItems(snapshot, options).some((entry) => entry.id === 'desktop.inspect-element')).toBe(false)
+    }
+    expect(buildBuiltinContextMenuItems(snapshot, { inspectElementEnabled: true }).slice(-2)).toEqual([
+      { kind: 'separator', id: 'desktop.separator.inspect' },
+      { kind: 'item', id: 'desktop.inspect-element', label: '检查', enabled: true, icon: 'inspect' },
+    ])
+    expect(BUILTIN_CONTEXT_MENU_ACTIONS['desktop.inspect-element']).toBe('inspect-element')
   })
 
   it('places plugin contributions behind a stable separator', () => {

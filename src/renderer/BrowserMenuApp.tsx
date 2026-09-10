@@ -18,6 +18,7 @@ import {
   Scissors,
   Settings,
   Sparkles,
+  SquareMousePointer,
   Terminal,
   Trash2,
   Undo2,
@@ -38,6 +39,7 @@ const contextIcons: Record<ContextMenuIcon, LucideIcon> = {
   undo: Undo2,
   redo: Redo2,
   'select-all': MousePointer2,
+  inspect: SquareMousePointer,
   'external-link': ExternalLink,
   browser: Monitor,
   link: Link,
@@ -113,6 +115,7 @@ function DisplayMenu({ payload }: { payload: BrowserMenuWindowPayload }): React.
 
 function SettingsMenu({ payload, showHistory }: { payload: BrowserMenuWindowPayload; showHistory: () => void }): React.JSX.Element {
   const zoom = payload.state.zoomFactor
+  const hasPage = payload.state.url.length > 0
   const viewportVisible = payload.state.viewport !== undefined
   return (
     <>
@@ -121,10 +124,10 @@ function SettingsMenu({ payload, showHistory }: { payload: BrowserMenuWindowPayl
       <Separator />
       <div className="zoom-row">
         <span>缩放</span>
-        <button type="button" aria-label="缩小" disabled={zoom <= .5} onClick={() => void invoke('set-zoom', zoom - .1)}>−</button>
+        <button type="button" aria-label="缩小" disabled={!hasPage || zoom <= .5} onClick={() => void invoke('set-zoom', zoom - .1)}>−</button>
         <strong>{Math.round(zoom * 100)}%</strong>
-        <button type="button" aria-label="放大" disabled={zoom >= 2} onClick={() => void invoke('set-zoom', zoom + .1)}>+</button>
-        <button type="button" aria-label="重置缩放" title="重置" disabled={zoom === 1} onClick={() => void invoke('set-zoom', 1)}><RefreshCw aria-hidden="true" /></button>
+        <button type="button" aria-label="放大" disabled={!hasPage || zoom >= 2} onClick={() => void invoke('set-zoom', zoom + .1)}>+</button>
+        <button type="button" aria-label="重置缩放" title="重置" disabled={!hasPage || zoom === 1} onClick={() => void invoke('set-zoom', 1)}><RefreshCw aria-hidden="true" /></button>
       </div>
       <Separator />
       <MenuItem

@@ -324,6 +324,7 @@ export interface DesktopBridge {
   setBrowserPanelOpen(open: boolean): Promise<void>
   setBrowserDisplayMode(mode: BrowserDisplayMode): Promise<void>
   openBrowserMenu(kind: BrowserMenuKind, anchor: DesktopBrowserMenuAnchor): Promise<void>
+  claimShellMenu(): Promise<void>
   setBrowserZoomFactor(factor: number): Promise<void>
   setBrowserDeviceViewport(viewport: DesktopBrowserViewport | null): Promise<void>
   previewBrowserDeviceViewport(viewport: DesktopBrowserViewport): Promise<void>

@@ -938,6 +938,8 @@ export function App(): ReactNode {
     contextMenuRef.current = request
     setContextMenu(request)
     setMenuOpen(false)
+    setBrowserDisplayMenuOpen(false)
+    setBrowserSettingsMenuOpen(false)
   }), [])
 
   useEffect(() => desktopApi.onApplicationMenuAction((action: DesktopApplicationMenuAction) => {
@@ -952,6 +954,10 @@ export function App(): ReactNode {
   useEffect(() => desktopApi.onPointerInput(({ x, y }) => {
     const target = document.elementFromPoint(x, y)
     if (target === null || target.closest('#title-menu, #title-menu-popover') === null) setMenuOpen(false)
+    if (target === null || target.closest('.browser-menu-layer, [data-browser-menu-trigger]') === null) {
+      setBrowserDisplayMenuOpen(false)
+      setBrowserSettingsMenuOpen(false)
+    }
 
     const current = contextMenuRef.current
     if (current !== undefined && (target === null || target.closest('.context-menu-card') === null)) {
@@ -1104,7 +1110,7 @@ export function App(): ReactNode {
     setBrowserShellOverlayActive(false)
   }, [])
 
-  const prepareBrowserShellSnapshot = useCallback(async (snapshot: DesktopBrowserShellSnapshot, generation = browserShellSnapshotGeneration.current): Promise<BrowserShellSnapshotImage | undefined> => {
+  const prepareBrowserShellSnapshot = useCallback(async (snapshot: DesktopBrowserShellSnapshot, generation = browserShellSnapshotGeneration.current, isCurrent?: () => boolean): Promise<BrowserShellSnapshotImage | undefined> => {
     const alreadyDecoded = browserShellSnapshotRef.current?.dataUrl === snapshot.dataUrl
     if (!alreadyDecoded) {
       const decoded = await new Promise<boolean>((resolve) => {
@@ -1115,7 +1121,7 @@ export function App(): ReactNode {
       })
       if (!decoded) return undefined
     }
-    if (generation !== browserShellSnapshotGeneration.current) return undefined
+    if (generation !== browserShellSnapshotGeneration.current || isCurrent?.() === false) return undefined
     const host = browserViewHost.current
     if (host === null) return undefined
     const hostRect = host.getBoundingClientRect()
@@ -1126,7 +1132,7 @@ export function App(): ReactNode {
       width: snapshot.bounds.width,
       height: snapshot.bounds.height,
     }
-    if (generation !== browserShellSnapshotGeneration.current) return undefined
+    if (generation !== browserShellSnapshotGeneration.current || isCurrent?.() === false) return undefined
     browserShellSnapshotRef.current = prepared
     setBrowserShellSnapshot(prepared)
     return prepared
@@ -1152,6 +1158,18 @@ export function App(): ReactNode {
       if (timer !== undefined) clearTimeout(timer)
     }
   }, [browserHistoryOpen, browserModalOpen, browserPanelOpen, clearBrowserShellSnapshot, prepareBrowserShellSnapshot, state?.browser.url, state?.browser.viewport?.height, state?.browser.viewport?.width])
+
+  useEffect(() => {
+    if (!browserShellOverlayActive) return
+    let disposed = false
+    const sequence = shellOverlaySequence.current
+    const generation = browserShellSnapshotGeneration.current
+    const isCurrent = (): boolean => !disposed && sequence === shellOverlaySequence.current
+    void desktopApi.refreshBrowserShellSnapshot().then(async (snapshot) => {
+      if (snapshot !== undefined && isCurrent()) await prepareBrowserShellSnapshot(snapshot, generation, isCurrent)
+    }).catch(() => undefined)
+    return () => { disposed = true }
+  }, [browserShellOverlayActive, prepareBrowserShellSnapshot, state?.browser.zoomFactor])
 
   useLayoutEffect(() => {
     const sequence = ++shellOverlaySequence.current
@@ -1311,7 +1329,11 @@ export function App(): ReactNode {
     })
   }, [])
 
-  const openBrowserMenu = useCallback((kind: 'display' | 'settings', _target: HTMLButtonElement) => {
+  const openBrowserMenu = useCallback(async (kind: 'display' | 'settings', _target: HTMLButtonElement) => {
+    await desktopApi.claimShellMenu()
+    contextMenuRef.current = undefined
+    setContextMenu(undefined)
+    setMenuOpen(false)
     if (kind === 'display') { setBrowserSettingsMenuOpen(false); setBrowserDisplayMenuOpen((open) => !open) }
     else { setBrowserDisplayMenuOpen(false); setBrowserSettingsMenuOpen((open) => !open) }
   }, [])
@@ -1474,7 +1496,7 @@ export function App(): ReactNode {
                 </div>
                 <div className="browser-panel-actions">
                   <button type="button" aria-label={browserExpanded ? '恢复面板宽度' : '展开面板'} title={browserExpanded ? '恢复面板宽度' : '展开面板'} onClick={toggleBrowserExpanded}>{browserExpanded ? <Minimize2 /> : <Maximize2 />}</button>
-                  <button type="button" aria-label={`显示方式：${browserDisplayModeLabel}`} aria-expanded={browserDisplayMenuOpen} title={`显示方式：${browserDisplayModeLabel}`} onClick={(event) => openBrowserMenu('display', event.currentTarget)}>
+                  <button type="button" data-browser-menu-trigger aria-label={`显示方式：${browserDisplayModeLabel}`} aria-expanded={browserDisplayMenuOpen} title={`显示方式：${browserDisplayModeLabel}`} onClick={(event) => openBrowserMenu('display', event.currentTarget)}>
                     {browserDisplayMode === 'split' ? <Columns2 /> : browserDisplayMode === 'drawer' ? <PanelRight /> : <FloatingWindowIcon />}
                   </button>
                   <button type="button" aria-label="隐藏浏览器" title="隐藏浏览器" onClick={() => void desktopApi.setBrowserPanelOpen(false)}><X /></button>
@@ -1488,7 +1510,7 @@ export function App(): ReactNode {
               </div>
               <BrowserAddressInput className="browser-address" url={state?.browser.url ?? ''} onNavigate={navigateBrowser} />
               <div className="browser-actions">
-                <button type="button" aria-label="浏览器设置" aria-expanded={browserSettingsMenuOpen} onClick={(event) => openBrowserMenu('settings', event.currentTarget)}><MoreVertical /></button>
+                <button type="button" data-browser-menu-trigger aria-label="浏览器设置" aria-expanded={browserSettingsMenuOpen} onClick={(event) => openBrowserMenu('settings', event.currentTarget)}><MoreVertical /></button>
               </div>
               </div>
             </header>
@@ -1525,10 +1547,10 @@ export function App(): ReactNode {
                     <div className="context-menu-separator" />
                     <div className="browser-zoom-row" role="group" aria-label="网页缩放">
                       <span>缩放</span>
-                      <button type="button" aria-label="缩小" disabled={(state?.browser.zoomFactor ?? 1) <= 0.5} onClick={() => void desktopApi.setBrowserZoomFactor((state?.browser.zoomFactor ?? 1) - 0.1)}><Minus /></button>
+                      <button type="button" aria-label="缩小" disabled={!state?.browser.url || (state.browser.zoomFactor ?? 1) <= 0.5} onClick={() => void desktopApi.setBrowserZoomFactor((state?.browser.zoomFactor ?? 1) - 0.1)}><Minus /></button>
                       <strong>{Math.round((state?.browser.zoomFactor ?? 1) * 100)}%</strong>
-                      <button type="button" aria-label="放大" disabled={(state?.browser.zoomFactor ?? 1) >= 2} onClick={() => void desktopApi.setBrowserZoomFactor((state?.browser.zoomFactor ?? 1) + 0.1)}><Plus /></button>
-                      <button type="button" aria-label="重置缩放" title="重置" disabled={(state?.browser.zoomFactor ?? 1) === 1} onClick={() => void desktopApi.setBrowserZoomFactor(1)}><RotateCw /></button>
+                      <button type="button" aria-label="放大" disabled={!state?.browser.url || (state.browser.zoomFactor ?? 1) >= 2} onClick={() => void desktopApi.setBrowserZoomFactor((state?.browser.zoomFactor ?? 1) + 0.1)}><Plus /></button>
+                      <button type="button" aria-label="重置缩放" title="重置" disabled={!state?.browser.url || (state.browser.zoomFactor ?? 1) === 1} onClick={() => void desktopApi.setBrowserZoomFactor(1)}><RotateCw /></button>
                     </div>
                     <div className="context-menu-separator" />
                     <button className="context-menu-item" type="button" role="menuitem" disabled={!state?.browser.url} onClick={() => {
@@ -1573,8 +1595,12 @@ export function App(): ReactNode {
       </main>
 
       <header className="titlebar">
-        <button id="title-menu" className="brand" type="button" aria-label="打开应用菜单" aria-expanded={menuOpen} title="应用菜单" onClick={(event) => {
+        <button id="title-menu" className="brand" type="button" aria-label="打开应用菜单" aria-expanded={menuOpen} title="应用菜单" onClick={async (event) => {
           event.currentTarget.blur()
+          await desktopApi.claimShellMenu()
+          dismissContextMenu(false)
+          setBrowserDisplayMenuOpen(false)
+          setBrowserSettingsMenuOpen(false)
           setMenuOpen((open) => !open)
         }}>
           <span className="brand-mark-shell" aria-hidden="true"><img className="brand-mark" src={titlebarIconUrl} alt="" draggable="false" /></span><span>DFY DSH Desktop</span><ChevronDown className="menu-chevron" aria-hidden="true" />
