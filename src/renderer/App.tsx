@@ -836,7 +836,16 @@ export function PluginManager({
         {!harnessReady ? <p className="plugin-inline-note">Harness 就绪后可安装、更新或移除插件；当前仍可浏览列表。</p> : null}
 
         {error ? <p className="plugin-error">{error}</p> : null}
-        {lastResult ? <details className={`plugin-command-result${lastResult.exitCode === 0 ? '' : ' error'}`}><summary>{lastResult.exitCode === 0 ? '命令执行完成' : '查看失败输出'}<code>{lastResult.command}</code></summary><pre>{lastResult.output}</pre></details> : null}
+        {lastResult ? (
+          <details className={`plugin-command-result${lastResult.exitCode === 0 ? '' : ' error'}`}>
+            <summary>
+              <span className="plugin-command-status">{lastResult.exitCode === 0 ? '命令执行完成' : '查看失败输出'}</span>
+              <code title={lastResult.command}>{lastResult.command}</code>
+              <ChevronDown className="plugin-command-chevron" aria-hidden="true" />
+            </summary>
+            <pre>{lastResult.output}</pre>
+          </details>
+        ) : null}
 
         <div className="plugin-list-toolbar">
           <div className="plugin-restart-slot">
