@@ -1,5 +1,5 @@
 import childProcess from 'node:child_process'
-import type { ChildProcess, SpawnOptions } from 'node:child_process'
+import type { ChildProcess, ForkOptions, SpawnOptions } from 'node:child_process'
 import { createRequire, registerHooks, syncBuiltinESMExports } from 'node:module'
 import { isAbsolute, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -7,8 +7,9 @@ import { registerDfySessionFormatCompatibility } from './harness-session-format-
 
 const electronExecutable = process.execPath.toLowerCase()
 const originalSpawn = childProcess.spawn
+const originalFork = childProcess.fork
 const directoryPickerWorkerShim = join(__dirname, 'directory-picker-worker.cjs')
-const windowsAclRunnerWorkerShim = join(__dirname, 'windows-acl-runner-worker.cjs')
+const windowsRunnerConsole = join(__dirname, 'windows-runner-console.cjs')
 const DESKTOP_BRIDGE_PACKAGE = 'dsh-desktop-bridge'
 const DESKTOP_BROWSER_PACKAGE = 'dsh-desktop-browser'
 
@@ -63,10 +64,11 @@ function isHarnessDirectoryPickerWorker(entry: string | undefined): entry is str
   return normalized.endsWith('/@deepseek-ai/dsh-host-directory-picker-native/lib/worker.cjs')
 }
 
-function isWindowsAclRunner(entry: string | undefined): entry is string {
+function isWindowsConsoleRunner(entry: string | undefined): entry is string {
   if (entry === undefined) return false
   const normalized = entry.replaceAll('\\', '/').toLowerCase()
-  return normalized.includes('/@deepseek-ai/dsh-sandbox-windows-acl/')
+  return (normalized.includes('/@deepseek-ai/dsh-sandbox-windows-acl/')
+    || normalized.includes('/@deepseek-ai/dsh-subprocess-local/'))
     && (normalized.endsWith('/runner.js') || normalized.endsWith('/runner.ts'))
 }
 
@@ -83,10 +85,13 @@ function desktopSpawn(command: string, args: readonly string[] = [], options: Sp
     // channel alive until `done`/`error`. Matching the package entry instead
     // of a runtime root makes this apply to both bundled and updated Harness.
     let workerArgs = args
+    const needsConsole = process.platform === 'win32' && isWindowsConsoleRunner(args[0])
     if (process.platform === 'win32' && isHarnessDirectoryPickerWorker(args[0])) {
       workerArgs = [directoryPickerWorkerShim, args[0], ...args.slice(1)]
-    } else if (process.platform === 'win32' && isWindowsAclRunner(args[0])) {
-      workerArgs = [windowsAclRunnerWorkerShim, args[0], ...args.slice(1)]
+    } else if (needsConsole) {
+      // A preload preserves import.meta.main for the ordinary subprocess
+      // runner. Importing it from a wrapper would skip its IPC entry point.
+      workerArgs = ['--require', windowsRunnerConsole, ...args]
     }
     const childEnvironment: NodeJS.ProcessEnv = {
       ...process.env,
@@ -100,12 +105,36 @@ function desktopSpawn(command: string, args: readonly string[] = [], options: Sp
     delete childEnvironment.ELECTRON_NO_ATTACH_CONSOLE
     return originalSpawn(command, workerArgs, {
       ...options,
+      // Hide the helper at creation, then explicitly attach it to the hidden
+      // host console before it launches native/restricted child processes.
+      ...(needsConsole ? { windowsHide: true } : {}),
       env: childEnvironment,
     })
   }
   return originalSpawn(command, args, options)
 }
 childProcess.spawn = desktopSpawn as typeof childProcess.spawn
+
+function desktopFork(modulePath: string | URL, argsOrOptions?: readonly string[] | ForkOptions, options?: ForkOptions): ChildProcess {
+  const normalized = String(modulePath).replaceAll('\\', '/').toLowerCase()
+  const isConsoleListWorker = normalized.endsWith('/node-pty/lib/conpty_console_list_agent')
+    || normalized.endsWith('/node-pty/lib/conpty_console_list_agent.js')
+  if (process.platform !== 'win32' || !isConsoleListWorker) {
+    return originalFork(modulePath, argsOrOptions as string[], options)
+  }
+  const args = Array.isArray(argsOrOptions) ? argsOrOptions : []
+  const workerOptions = (Array.isArray(argsOrOptions) ? options : argsOrOptions ?? options) as ForkOptions | undefined
+  const env = { ...process.env, ...workerOptions?.env }
+  if ((workerOptions?.execPath ?? process.execPath).toLowerCase() === electronExecutable) {
+    env.ELECTRON_RUN_AS_NODE = '1'
+    delete env.ELECTRON_NO_ATTACH_CONSOLE
+  }
+  // Node's fork calls its internal spawn, bypassing the exported spawn hook.
+  // node-pty uses this helper when collecting terminal descendants on close.
+  const hiddenOptions = { ...workerOptions, env, windowsHide: true }
+  return originalFork(modulePath, args, hiddenOptions)
+}
+childProcess.fork = desktopFork as typeof childProcess.fork
 syncBuiltinESMExports()
 
 /**

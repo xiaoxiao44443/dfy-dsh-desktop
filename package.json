@@ -1,7 +1,7 @@
 {
   "name": "dfy-dsh-desktop",
   "productName": "DFY DSH Desktop",
-  "version": "0.1.5-rc.1",
+  "version": "0.1.5-rc.1-1",
   "description": "A fast desktop shell for DeepSeek Harness with managed Harness runtime updates.",
   "type": "module",
   "main": "dist/main/index.js",

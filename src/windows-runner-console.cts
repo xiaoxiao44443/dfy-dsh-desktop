@@ -1,6 +1,5 @@
 import { createRequire } from 'node:module'
 import { isAbsolute } from 'node:path'
-import { pathToFileURL } from 'node:url'
 
 interface KoffiLibrary {
   func(declaration: string): (...args: unknown[]) => unknown
@@ -36,16 +35,13 @@ function attachToHarnessConsole(runnerEntry: string): void {
   throw new Error(`AttachConsole failed (Win32 ${String(getLastError())})`)
 }
 
-async function bootstrap(): Promise<void> {
-  const runnerEntry = process.argv[2]
+// Loaded with --require so DSH retains its original entry point, arguments,
+// import.meta.main and IPC channel. Both ordinary and ACL runners need a real
+// console to prevent their native children from allocating a visible one.
+if (process.platform === 'win32') {
+  const runnerEntry = process.argv[1]
   if (runnerEntry === undefined || !isAbsolute(runnerEntry)) {
-    throw new Error('Windows ACL runner entry path must be absolute')
+    throw new Error('Windows runner entry path must be absolute')
   }
-
   attachToHarnessConsole(runnerEntry)
-  const runnerArgs = process.argv.slice(3)
-  process.argv = [process.execPath, runnerEntry, ...runnerArgs]
-  await import(pathToFileURL(runnerEntry).href)
 }
-
-void bootstrap()
