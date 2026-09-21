@@ -24,6 +24,7 @@ import { isSupportedBrowserUrl, normalizeBrowserPageUrl, normalizeLocalHtmlUrl }
 import { installImageContextCapture } from './image-context.js'
 import { ACTIVE_INPUT_EXPRESSION, PREPARE_BROWSER_INPUT, VERIFY_BROWSER_INPUT } from './browser-input.js'
 import { BROWSER_HIT_TARGET_HELPERS } from './browser-hit-target.js'
+import { BrowserPointerMotion } from './browser-pointer-motion.js'
 import { BROWSER_ROLE_VISIBILITY_HELPERS } from './browser-role-visibility.js'
 import type {
   BrowserAsyncEventKind,
@@ -190,6 +191,7 @@ export class DesktopBrowserService extends EventEmitter {
   private viewportApplyRunning = false
   private viewportApplyDirty = false
   private readonly inputScales = new WeakMap<WebContents, number>()
+  private readonly pointerMotions = new WeakMap<WebContents, BrowserPointerMotion>()
   private browserSessionConfigured = false
   private closingFloatingWindow = false
   private floatingOverlayOpen = false
@@ -1865,6 +1867,10 @@ export class DesktopBrowserService extends EventEmitter {
       this.changed()
     })
     contents.on('did-start-navigation', (_event, _url, isInPlace, isMainFrame) => {
+      if (isMainFrame) {
+        this.pointerMotions.get(contents)?.reset()
+        if (!contents.isDestroyed()) contents.send(POINTER_CHANNEL, { hidden: true })
+      }
       if (isMainFrame && !isInPlace) delete tab.lastNavigationFailure
     })
     contents.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
@@ -3161,7 +3167,7 @@ export class DesktopBrowserService extends EventEmitter {
       if (operation === 'set-checked') return { ok: true, tabId: tab.id, operation, checked: resolution.checked, method: 'dom' }
     }
     if (operation === 'click') {
-      const result = await this.click(tab, { x: match.x, y: match.y, clickCount: request.clickCount, button: request.button, keypress: request.modifiers })
+      const result = await this.click(tab, { x: match.x, y: match.y, clickCount: request.clickCount, button: request.button, keypress: request.modifiers }, plan)
       return { ...result, operation }
     }
     if (operation === 'fill' || operation === 'type') {
@@ -3215,7 +3221,7 @@ export class DesktopBrowserService extends EventEmitter {
       if (response.result?.value !== true) throw new Error('坐标处没有可悬停的网页元素。')
       return { ok: true, tabId: tab.id, x: Math.round(target.x), y: Math.round(target.y), method: 'dom' }
     }
-    await this.pointer(tab, target.x, target.y, false)
+    await this.movePointer(tab, target.x, target.y)
     await this.debuggerCommandFor(tab, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: target.x, y: target.y, modifiers: modifiers.mask })
     this.invalidateTabSnapshot(tab)
     return { ok: true, tabId: tab.id, x: Math.round(target.x), y: Math.round(target.y) }
@@ -3397,8 +3403,8 @@ export class DesktopBrowserService extends EventEmitter {
     return target
   }
 
-  private async click(tab: BrowserTabRuntime, request: DesktopBrowserAgentRequest): Promise<Record<string, unknown>> {
-    const target = await this.pointerTarget(tab, request)
+  private async click(tab: BrowserTabRuntime, request: DesktopBrowserAgentRequest, plan?: BrowserLocatorStep[]): Promise<Record<string, unknown>> {
+    let target = await this.pointerTarget(tab, request)
     const clickCount = request.clickCount === undefined ? 1 : positiveInteger(request.clickCount, 'clickCount', 1, 3)
     const button = mouseButton(request.button)
     const modifiers = inputModifierState(request.keypress ?? request.modifiers)
@@ -3430,7 +3436,24 @@ export class DesktopBrowserService extends EventEmitter {
       this.invalidateTabSnapshot(tab)
       return { ok: true, tabId: tab.id, x: Math.round(target.x), y: Math.round(target.y), clickCount, button: button.cdp, method: 'dom', hitVerified: true }
     }
-    if (button.cdp === 'left') await this.pointer(tab, target.x, target.y, false)
+    const navigationVersion = tab.navigationVersion
+    for (let attempt = 0; ; attempt += 1) {
+      await this.movePointer(tab, target.x, target.y)
+      // The visual delay must not make a Locator click a stale coordinate.
+      const next = plan === undefined
+        ? await this.pointerTarget(tab, request)
+        : strictLocator(await this.resolveLocator(tab, plan, 'prepare-click', request))
+      if (plan !== undefined) {
+        const match = next as BrowserLocatorMatch
+        if (!match.visible || !match.enabled || !match.hitTarget) throw new Error('指针到达后，Locator 目标已隐藏、禁用或被遮挡。')
+      }
+      if (tab.view.webContents.isDestroyed() || !tab.view.getVisible() || tab.navigationVersion !== navigationVersion) {
+        throw new Error('指针到达后页面或标签状态已改变，请重新检查目标。')
+      }
+      if (Math.hypot(next.x - target.x, next.y - target.y) < 1) break
+      if (attempt >= 1) throw new Error('指针移动期间目标位置持续变化，请重新检查目标。')
+      target = { x: next.x, y: next.y }
+    }
     await this.debuggerCommandFor(tab, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: target.x, y: target.y, modifiers: modifiers.mask })
     for (let count = 1; count <= clickCount; count += 1) {
       if (button.cdp === 'left') await this.pointer(tab, target.x, target.y, true)
@@ -3490,7 +3513,7 @@ export class DesktopBrowserService extends EventEmitter {
       return { ok: true, tabId: tab.id, start, end, durationMs, method: 'dom' }
     }
     const steps = Math.max(path.length - 1, Math.min(60, Math.round(durationMs / 40)))
-    await this.pointer(tab, start.x, start.y, false)
+    await this.movePointer(tab, start.x, start.y)
     await this.debuggerCommandFor(tab, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: start.x, y: start.y })
     let pressed = false
     try {
@@ -3939,7 +3962,26 @@ export class DesktopBrowserService extends EventEmitter {
   private async pointer(tab: BrowserTabRuntime, x: number, y: number, pressed: boolean): Promise<void> {
     const contents = tab.view.webContents
     if (contents === undefined || contents.isDestroyed()) return
-    contents.send(POINTER_CHANNEL, { x, y, pressed, theme: this.theme })
+    this.pointerMotion(tab).place({ x, y }, pressed)
+  }
+
+  private pointerMotion(tab: BrowserTabRuntime): BrowserPointerMotion {
+    const contents = tab.view.webContents
+    let motion = this.pointerMotions.get(contents)
+    if (motion === undefined) {
+      motion = new BrowserPointerMotion((point, pressed) => {
+        if (!contents.isDestroyed()) contents.send(POINTER_CHANNEL, { ...point, pressed, theme: this.theme })
+      })
+      this.pointerMotions.set(contents, motion)
+    }
+    return motion
+  }
+
+  private async movePointer(tab: BrowserTabRuntime, x: number, y: number): Promise<void> {
+    const contents = tab.view.webContents
+    const navigationVersion = tab.navigationVersion
+    await this.pointerMotion(tab).move({ x, y }, () => !contents.isDestroyed()
+      && tab.view.getVisible() && tab.navigationVersion === navigationVersion)
   }
 
   private async writeJson(path: string, value: unknown): Promise<void> {

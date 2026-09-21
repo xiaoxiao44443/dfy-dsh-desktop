@@ -112,6 +112,7 @@ Playwright API:
 
 Coordinate fallback API:
 - await tab.cua.click({ x, y, button?, keypress? }), double_click({ x, y, keypress? }), move({ x, y, keys? }), drag({ path, keys? }), keypress({ keys }), type({ text }), and scroll({ x, y, scrollX, scrollY, keypress? }) mirror the compact Codex CUA shape. Drag preserves intermediate path points.
+- Visible coordinate clicks, moves and top-level Locator clicks automatically animate the agent pointer before sending input at the destination. Intermediate animation frames are visual only and do not hover page elements; do not generate extra path points for ordinary clicks or moves. Drag still sends page input along its path.
 - Coordinate helpers use viewport CSS pixels. Screenshot width/height describe PNG pixels; viewportWidth/viewportHeight describe the CSS viewport. coordinateMapping converts a PNG point to viewport CSS coordinates: x = originX + imageX * cssPixelsPerImagePixelX, y = originY + imageY * cssPixelsPerImagePixelY. These factors already account for image scale and a region capture's origin; do not multiply by devicePixelRatio or page zoom again.
 - Take tab.screenshot() immediately before coordinate work and do not reuse coordinates after navigation, scrolling, resizing, or a significant visual change.
 - await tab.dom_cua.get_visible_dom() returns the current snapshot text and binds its node IDs. Then use click({ node_id }), double_click({ node_id }), screenshot({ node_id }), scroll({ node_id?, x, y }), keypress({ keys }), or type({ text }). Refresh it after significant page changes.
