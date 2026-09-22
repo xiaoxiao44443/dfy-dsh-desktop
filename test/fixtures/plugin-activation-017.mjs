@@ -2,11 +2,11 @@
 // Uses an isolated Profile and actual DSH services; never reads user sessions.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
-import { runInNewContext } from 'node:vm';
+import { createDesktopPluginClient } from './desktop-plugin-client.mjs';
 
 const require = createRequire(realpathSync(resolve(process.argv[2])));
 const load = name => import(pathToFileURL(require.resolve(name)));
@@ -18,6 +18,7 @@ const { default: Timer } = await load('@deepseek-ai/cordis-plugin-timer');
 for (const live of [false, true]) {
   const home = mkdtempSync(join(tmpdir(), 'dfy-official-switch-'));
   let ctx;
+  let client;
   try {
     const dir = join(home, 'profiles', 'test');
     const anchor = join(home, 'package.json');
@@ -53,12 +54,12 @@ for (const live of [false, true]) {
       await ctx.plugin(Hmr, { root: [], ignored: [], debounce: 0 });
       await ctx.hmr.runExclusive(async () => {});
     }
-    let factory;
-    const window = { __ModuleLoader__: { load(entry) { factory = entry.factory; } } };
-    runInNewContext(readFileSync(new URL('../../resources/dsh-desktop-bridge/lib/client.js', import.meta.url), 'utf8'), { window });
-    const client = factory(name => name === '@deepseek-ai/cordis' ? { Service: class {} } : {});
-    const dispose = client.installPluginManagerTransport({ pluginManager: ctx.pluginManager });
-    const bridge = window[Symbol.for('dsh.desktop.plugin-manager.transport.v1')];
+    client = await createDesktopPluginClient(resolve(process.argv[2]), async (path, endpoint, payload) => {
+      assert.equal(path, '/api');
+      assert.equal(endpoint, 'pluginManager/setBundleEnabled');
+      return { ok: true, value: await ctx.pluginManager.setBundleEnabled(payload.args.name, payload.args.enabled) };
+    });
+    const bridge = client.transport;
     assert.equal(ctx.managedProbe, true);
     assert.equal((await bridge.setBundleEnabled('extra', false)).application, live ? 'applied' : 'restart-required');
     assert.deepEqual(readProfileManifest('test', dir).dsh.profile.bundles, ['core']);
@@ -74,10 +75,11 @@ for (const live of [false, true]) {
       assert.equal(ctx.managedProbe, true);
     }
     assert.equal((await bridge.setBundleEnabled('core', false)).error.code, 'management-required');
-    dispose();
-    assert.equal(window[Symbol.for('dsh.desktop.plugin-manager.transport.v1')], undefined);
-    console.log(`PASS official bundle switches, dependency preservation and bridge lifecycle (HMR ${live})`);
+    await client.dispose();
+    assert.equal(client.window[Symbol.for('dsh.desktop.plugin-manager.transport.v1')], undefined);
+    console.log(`PASS official Client Gateway bundle switches, dependency preservation and bridge lifecycle (HMR ${live})`);
   } finally {
+    await client?.dispose();
     await ctx?.fiber.dispose();
     rmSync(home, { recursive: true, force: true });
   }

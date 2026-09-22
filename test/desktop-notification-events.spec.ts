@@ -59,7 +59,7 @@ it('bridges official plugin switches and withdraws only its own transport on rel
   const client = await loadClientModule()
   const install = client.installPluginManagerTransport as (remote: unknown) => () => void
   const outcome = { changed: true, application: 'applied' }
-  const setBundleEnabled = vi.fn(async () => outcome)
+  const setBundleEnabled = vi.fn(async () => ({ ok: true, value: outcome }))
   const key = Symbol.for('dsh.desktop.plugin-manager.transport.v1')
   const target = window as unknown as Record<symbol, { setBundleEnabled(name: string, enabled: boolean): Promise<unknown> }>
   const first = install({ pluginManager: { setBundleEnabled } })

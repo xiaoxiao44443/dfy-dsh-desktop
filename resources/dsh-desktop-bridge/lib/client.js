@@ -726,7 +726,9 @@ window.__ModuleLoader__.load({
 			const transport = {
 				async setBundleEnabled(name, enabled) {
 					if (typeof name !== "string" || typeof enabled !== "boolean") throw new Error("Invalid bundle switch");
-					return await remote.pluginManager.setBundleEnabled(name, enabled);
+					const answer = await remote.pluginManager.setBundleEnabled(name, enabled);
+					if (!answer.ok) throw new Error(answer.error.message);
+					return answer.value;
 				}
 			};
 			Object.defineProperty(window, key, { value: transport, configurable: true });
@@ -734,7 +736,7 @@ window.__ModuleLoader__.load({
 		}
 		exports.installPluginManagerTransport = installPluginManagerTransport;
 		exports.name = "desktop-notifications";
-		exports.inject = ["slots", "sessions", "uiSession", "uiConversation", "uiWorkspace", "cordisInspect", "remote"];
+		exports.inject = ["slots", "sessions", "uiSession", "uiConversation", "uiWorkspace", "cordisInspect", "remote", "remote.pluginManager"];
 		exports.projectSessions = projectSessions;
 		exports.diffSessionNotifications = diffSessionNotifications;
 		exports.latestAssistantReply = latestAssistantReply;
