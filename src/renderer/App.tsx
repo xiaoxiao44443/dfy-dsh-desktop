@@ -642,8 +642,9 @@ export function PluginManager({
       const result = await action()
       setInventory(result.inventory)
       if (showResult) setLastResult(result)
-      if (result.exitCode === 0) setRestartRequired(true)
-      else setError(`命令执行失败（退出码 ${result.exitCode}）。`)
+      if (result.exitCode === 0) {
+        if (result.restartRequired !== false) setRestartRequired(true)
+      } else setError(result.output || `命令执行失败（退出码 ${result.exitCode}）。`)
       return result.exitCode === 0
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : String(nextError))
@@ -690,7 +691,7 @@ export function PluginManager({
   }
 
   const setActive = async (packageName: string, active: boolean): Promise<void> => {
-    await runMutation(() => desktopApi.setPluginActive({ profile: selectedProfile, packageName, active }), false)
+    await runMutation(() => desktopApi.setPluginActive({ profile: selectedProfile, packageName, active }))
   }
 
   const copyPluginText = async (text: string): Promise<void> => {
@@ -772,6 +773,7 @@ export function PluginManager({
         <div className="plugin-row-main">
           <div className="plugin-name-line"><strong>{plugin.name}</strong>{plugin.version ? <span>{plugin.version}</span> : null}</div>
           <p>{plugin.description ?? (plugin.sourceType === 'builtin' ? '由当前 Harness 运行时提供' : '暂无插件说明')}</p>
+          {plugin.includedPlugins ? <p>组合包 · 包含 {plugin.includedPlugins.length} 个插件，可在 DSH「插件」详情页分别启停。</p> : null}
           <div className="plugin-source" title={plugin.source}><span className={`plugin-source-badge ${plugin.sourceType}`}>{PLUGIN_SOURCE_LABELS[plugin.sourceType]}</span><code>{plugin.source}</code></div>
         </div>
         <div className="plugin-row-actions">
@@ -782,7 +784,7 @@ export function PluginManager({
               role="switch"
               aria-checked={plugin.active}
               aria-label={`${plugin.active ? '停用' : '启用'} ${plugin.name}`}
-              title={plugin.toggleable ? `${plugin.active ? '停用' : '启用'}插件（重启 Harness 后生效）` : stateLabel}
+              title={plugin.toggleable ? `${plugin.active ? '停用' : '启用'}${plugin.includedPlugins ? '整个组合包' : '插件'}` : stateLabel}
               disabled={operating || !plugin.toggleable || plugin.status === 'missing'}
               onClick={() => void setActive(plugin.name, !plugin.active)}
             >

@@ -110,7 +110,7 @@ window.__ModuleLoader__.load({
         "data-open": String(open),
         disabled,
         onClick: () => setOpen((current) => !current)
-      }, React.createElement("span", null, labels[value]), React.createElement(Primitives.IconChevronDownOutline14, { size: 14 }));
+      }, React.createElement("span", null, labels[value]), React.createElement(Primitives.IconChevronDownOutlineRegular, { size: 14 }));
       return React.createElement(Primitives.Menu, {
         open,
         anchor,
@@ -138,7 +138,7 @@ window.__ModuleLoader__.load({
         "data-open": String(open),
         disabled,
         onClick: () => setOpen((current) => !current)
-      }, React.createElement("span", null, labels[value]), React.createElement(Primitives.IconChevronDownOutline14, { size: 14 }));
+      }, React.createElement("span", null, labels[value]), React.createElement(Primitives.IconChevronDownOutlineRegular, { size: 14 }));
       return React.createElement(Primitives.Menu, {
         open,
         anchor,

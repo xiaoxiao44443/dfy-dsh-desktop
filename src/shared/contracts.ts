@@ -70,6 +70,7 @@ export interface ManagedPluginEntry {
   toggleable: boolean
   removable: boolean
   status: PluginInstallStatus
+  includedPlugins?: Array<{ name: string; version?: string; status: PluginInstallStatus }>
 }
 
 export interface PluginProfileInventory {
@@ -95,6 +96,7 @@ export interface DfyPluginDefinition {
   description: string
   repository: string
   note?: string
+  includes?: string[]
 }
 
 export interface DfyPluginCatalog {
@@ -130,6 +132,17 @@ export interface PluginMutationResult {
   command: string
   output: string
   exitCode: number
+  restartRequired?: boolean
+}
+
+/** Public outcome of DSH pluginManager.setBundleEnabled. */
+export interface PluginActivationOutcome {
+  changed: boolean
+  application: 'applied' | 'restart-required' | 'overridden' | 'failed' | 'cancelled'
+  target: string
+  enabled?: boolean
+  error?: { code: string; diagnostic?: string }
+  warnings?: string[]
 }
 
 export interface PluginRecoveryEntry {

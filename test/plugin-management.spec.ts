@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { classifyPluginSource, PluginManagementService } from '../src/main/plugin-management.js'
 
 const roots: string[] = []
@@ -175,13 +175,10 @@ describe('PluginManagementService', () => {
     await service.remove({ profile: 'web', packageName })
     manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as typeof manifest
     expect(manifest.dsh.profile.bundles).toEqual(['@deepseek-ai/dsh-base'])
-    expect(manifest.dsh.desktop).toEqual({
-      bundleOrder: ['@deepseek-ai/dsh-base'],
-      disabledBundles: [],
-    })
+    expect(manifest.dsh.desktop).toBeUndefined()
   })
 
-  it('persists plugin activation and restores the original bundle order', async () => {
+  it('shares official bundle choices, preserves disabled plugins during updates and appends on re-enable', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-plugin-activation-'))
     roots.push(root)
     const harnessHome = join(root, 'home')
@@ -217,19 +214,21 @@ describe('PluginManagementService', () => {
     await service.setActive({ profile: 'web', packageName: '@sample/third', active: false })
     expect(await bundles()).toEqual(['@deepseek-ai/dsh-base', '@sample/first'])
 
-    const reconciled = JSON.parse(await readFile(manifestPath, 'utf8')) as {
-      dsh: { profile: { bundles: string[] } }
-    }
-    reconciled.dsh.profile.bundles.push('@sample/second', '@sample/third')
-    await writeFile(manifestPath, JSON.stringify(reconciled))
-    await service.install({ profile: 'web', source: '@sample/fourth' })
+    await service.update({ profile: 'web', packageName: '@sample/second' })
     expect(await bundles()).toEqual(['@deepseek-ai/dsh-base', '@sample/first'])
 
     await service.setActive({ profile: 'web', packageName: '@sample/third', active: true })
     await service.setActive({ profile: 'web', packageName: '@sample/second', active: true })
-    expect(await bundles()).toEqual(['@deepseek-ai/dsh-base', ...pluginNames])
+    expect(await bundles()).toEqual(['@deepseek-ai/dsh-base', '@sample/first', '@sample/third', '@sample/second'])
     expect((await service.getInventory()).profiles[0]?.plugins.filter((plugin) => plugin.sourceType !== 'builtin'))
-      .toMatchObject(pluginNames.map((name) => ({ name, active: true, toggleable: true })))
+      .toMatchObject(['@sample/first', '@sample/third', '@sample/second'].map((name) => ({ name, active: true, toggleable: true })))
+
+    // A switch made by the official UI remains authoritative on the next read.
+    const official = JSON.parse(await readFile(manifestPath, 'utf8'))
+    official.dsh.profile.bundles = official.dsh.profile.bundles.filter((name: string) => name !== '@sample/first')
+    await writeFile(manifestPath, JSON.stringify(official))
+    expect((await service.getInventory()).profiles[0]?.plugins.find(plugin => plugin.name === '@sample/first')?.active).toBe(false)
+    expect(official.dsh.desktop).toBeUndefined()
   })
 
   it('does not enable an installed dependency without a DSH bundle', async () => {
@@ -251,6 +250,47 @@ describe('PluginManagementService', () => {
 
     await expect(service.setActive({ profile: 'web', packageName: '@sample/library', active: true }))
       .rejects.toThrow('没有声明 DSH bundle')
+  })
+
+  it('delegates live switches and reports the official outcome without a fallback write', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-live-switch-'))
+    roots.push(root)
+    const profile = join(root, 'profiles/web')
+    await mkdir(profile, { recursive: true })
+    const path = join(profile, 'package.json')
+    const initial = JSON.stringify({ dependencies: { broken: '1.0.0' }, dsh: { profile: { bundles: ['base', 'broken'] } } })
+    await writeFile(path, initial)
+    const setBundleEnabled = vi.fn(async () => ({
+      changed: true, target: 'broken', application: 'applied' as const,
+    }))
+    const service = new PluginManagementService(root, { getWindow: () => undefined,
+      runPnpm: vi.fn(), setBundleEnabled,
+    })
+    const request = { profile: 'web', packageName: 'broken', active: false }
+    const result = await service.setActive(request)
+    expect(setBundleEnabled).toHaveBeenCalledExactlyOnceWith(request)
+    expect(result).toMatchObject({ exitCode: 0, restartRequired: false, output: expect.stringContaining('官方') })
+    expect(await readFile(path, 'utf8')).toBe(initial)
+    setBundleEnabled.mockRejectedValueOnce(new Error('manager disconnected'))
+    await expect(service.setActive(request)).rejects.toThrow('manager disconnected')
+    expect(await readFile(path, 'utf8')).toBe(initial)
+  })
+
+  it.each(['failed', 'restart-required', 'overridden'] as const)('surfaces %s without reporting immediate activation', async (application) => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-switch-outcome-'))
+    roots.push(root)
+    const profile = join(root, 'profiles/web')
+    await mkdir(profile, { recursive: true })
+    await writeFile(join(profile, 'package.json'), JSON.stringify({ dependencies: { demo: '1' }, dsh: { profile: { bundles: ['demo'] } } }))
+    const service = new PluginManagementService(root, { getWindow: () => undefined, runPnpm: vi.fn(),
+      setBundleEnabled: async () => ({ changed: true, target: 'demo', application,
+        ...(application === 'failed' ? { error: { code: 'operation-error', diagnostic: 'activation failed' } } : {}),
+      }),
+    })
+    const result = await service.setActive({ profile: 'web', packageName: 'demo', active: false })
+    expect(result.restartRequired).toBe(application === 'restart-required')
+    expect(result.exitCode).toBe(application === 'failed' ? 1 : 0)
+    expect(result.output).toContain(application === 'failed' ? 'activation failed' : application === 'overridden' ? '覆盖' : '重启')
   })
 })
 

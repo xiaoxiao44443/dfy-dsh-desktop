@@ -76,7 +76,7 @@ export async function apply(ctx, overrides = {}) {
     text: STATIC_GUIDANCE,
   })
 
-  let baseline = await profileFingerprint(profilePath)
+  const baseline = await profileFingerprint(profilePath)
   let profileChanged = false
   ctx.systemPrompt.context({
     name: 'desktop:profile-restart-required',
@@ -103,11 +103,14 @@ export async function apply(ctx, overrides = {}) {
     clearTimeout(refreshTimer)
     refreshTimer = setTimeout(() => {
       void profileFingerprint(profilePath).then((current) => {
-        const changed = current !== baseline
+        // HMR can finish starting after this bridge. Test its current presence
+        // against the same startup snapshot instead of fixing the mode early.
+        const field = ctx.get?.('hmr') !== undefined ? 'packages' : 'profile'
+        const changed = current[field] !== baseline[field]
         if (changed === profileChanged) return
         profileChanged = changed
         ctx.emit('system-prompt/change')
-      })
+      }).catch(() => { /* A package manager may be replacing the files. Retry on the next change. */ })
     }, 120)
     refreshTimer.unref?.()
   }
@@ -123,7 +126,6 @@ export async function apply(ctx, overrides = {}) {
   return () => {
     clearTimeout(refreshTimer)
     for (const file of watchedFiles) unwatchFile(file, refresh)
-    baseline = ''
   }
 }
 
@@ -221,5 +223,7 @@ async function profileFingerprint(profilePath) {
       throw error
     }
   }))
-  return contents.join('\u0000')
+  let packages = contents[0]
+  try { packages = JSON.stringify(JSON.parse(contents[0]).dependencies ?? {}) } catch {}
+  return { packages, profile: contents.join('\u0000') }
 }

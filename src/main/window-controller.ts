@@ -1,6 +1,5 @@
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { readFile } from 'node:fs/promises'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, nativeTheme, shell } from 'electron'
 import type { ContextMenuParams, Session, WebContents, WebFrameMain } from 'electron'
 import type { BrowserDisplayMode, BrowserMenuKind, ColorTheme, DesktopApplicationMenuAction, DesktopBrowserMenuAnchor, DesktopBrowserNavigationAction, DesktopBrowserViewBounds, DesktopBrowserViewport, DesktopPlatform, DesktopState, DevelopmentPluginRequest, DfyPluginMutationRequest, HarnessLifecycle, PluginActivationRequest, PluginInitializationFailure, PluginInstallRequest, PluginRemoveRequest, PluginUpdateRequest, TitleMenuAction, WindowAction } from '../shared/contracts.js'
@@ -22,6 +21,7 @@ import type { DesktopApplicationMenuState } from '../shared/contracts.js'
 import type { DesktopUpdateService } from './desktop-update.js'
 import { filterHarnessRequestCookies } from './harness-request-cookies.js'
 import type { DesktopApprovalDecision, DesktopNotificationApproval } from './desktop-notifications.js'
+import type { PluginActivationOutcome } from '../shared/contracts.js'
 
 const STATE_CHANNEL = 'desktop:state'
 const CONTEXT_MENU_CHANNEL = 'desktop:context-menu'
@@ -38,10 +38,8 @@ const IMAGE_MENU_LOOKUP_TIMEOUT_MS = 500
 
 type ColorThemePreference = ColorTheme | 'system'
 
-export function parseHarnessThemePreference(settings: string): ColorThemePreference | undefined {
-  const themeBlock = settings.match(/^ui-theme\s*:\s*(?:#.*)?\r?\n((?:[ \t]+[^\r\n]*(?:\r?\n|$))*)/m)?.[1]
-  const preference = themeBlock?.match(/^\s+preference\s*:\s*['"]?(dark|light|system)['"]?\s*(?:#.*)?$/mi)?.[1]
-  return preference === 'dark' || preference === 'light' || preference === 'system' ? preference : undefined
+export function parseHarnessThemePreference(value: unknown): ColorThemePreference | undefined {
+  return value === 'dark' || value === 'light' || value === 'system' ? value : undefined
 }
 
 export function resolveHarnessThemePreference(
@@ -379,6 +377,29 @@ export class WindowController {
   getBrowserWindow(): BrowserWindow | undefined {
     const window = this.window
     return window !== undefined && !window.isDestroyed() ? window : undefined
+  }
+
+  async setHarnessPluginActive(request: PluginActivationRequest): Promise<PluginActivationOutcome | undefined> {
+    // This desktop starts the web Profile. Other Profiles only have durable
+    // configuration until a separate Harness process starts them.
+    if (request.profile !== 'web') return undefined
+    const frame = this.findHarnessFrame()
+    if (this.harnessLifecycle !== 'ready' || frame === undefined || !this.isHarnessFrame(frame)) {
+      throw new Error('Harness 尚未就绪，请启动后再更改插件启用状态。')
+    }
+    const result: unknown = await frame.executeJavaScript(`(async () => {
+      if (location.origin !== ${JSON.stringify(this.harnessOrigin)}) throw new Error('Harness 页面已变更，请重试。');
+      const transport = window[Symbol.for('dsh.desktop.plugin-manager.transport.v1')];
+      if (typeof transport?.setBundleEnabled !== 'function') throw new Error('DSH 插件管理器尚未就绪，请稍后重试。');
+      return await transport.setBundleEnabled(${JSON.stringify(request.packageName)}, ${JSON.stringify(request.active)});
+    })()`)
+    if (result === null || typeof result !== 'object') throw new Error('DSH 插件管理器返回了无效结果。')
+    const value = result as Partial<PluginActivationOutcome>
+    if (value.target !== request.packageName || typeof value.changed !== 'boolean'
+      || !['applied', 'restart-required', 'overridden', 'failed', 'cancelled'].includes(String(value.application))) {
+      throw new Error('DSH 插件管理器返回了无效结果。')
+    }
+    return value as PluginActivationOutcome
   }
 
   focusHarnessSession(sessionId: string): void {
@@ -1321,12 +1342,18 @@ export class WindowController {
 
   private async readConfiguredThemePreference(): Promise<ColorThemePreference> {
     try {
-      const settings = await readFile(join(this.runtime.harnessHome, 'settings.yaml'), 'utf8')
-      return parseHarnessThemePreference(settings) ?? 'system'
+      // DSH 0.1.7 publishes the resolved Profile preference before rendering,
+      // then keeps this attribute current when the user changes Appearance.
+      const frame = this.findHarnessFrame()
+      if (frame !== undefined) {
+        const value: unknown = await frame.executeJavaScript('document.documentElement.getAttribute("data-ds-theme-source")')
+        const preference = parseHarnessThemePreference(value)
+        if (preference !== undefined) return preference
+      }
     } catch {
-      // Harness creates settings.yaml lazily; its default preference is system.
-      return 'system'
+      // Keep the last preference while Harness loads or replaces its frame.
     }
+    return nativeTheme.themeSource
   }
 
   private async readConfiguredTheme(): Promise<ColorTheme> {

@@ -1,6 +1,7 @@
 import { access, lstat, mkdir, readFile, realpath, symlink, unlink } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 import type { HarnessDesktopBridgeLaunch } from './harness-desktop-bridge.js'
+import { upgradeDfyProfile } from './profile-upgrade.js'
 
 type DesktopPluginPaths = Pick<HarnessDesktopBridgeLaunch, 'profilePath' | 'pluginRootPath' | 'browserPluginRootPath'>
 const pendingRepairs = new Map<string, Promise<void>>()
@@ -36,6 +37,7 @@ export async function ensureDesktopPluginLinks(paths: DesktopPluginPaths): Promi
 
 async function repairLinks(paths: DesktopPluginPaths): Promise<void> {
   if (!isAbsolute(paths.profilePath)) throw new Error('Desktop Profile path must be absolute')
+  await upgradeDfyProfile(paths.profilePath)
   const packages = [
     { name: 'dsh-desktop-bridge', root: paths.pluginRootPath },
     { name: 'dsh-desktop-browser', root: paths.browserPluginRootPath },

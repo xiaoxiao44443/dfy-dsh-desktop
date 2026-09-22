@@ -256,6 +256,37 @@ describe('notification approval dispatch', () => {
   })
 })
 
+describe('official plugin activation transport', () => {
+  it('calls only the current Harness page and preserves service outcomes', async () => {
+    const runtime = Object.assign(new EventEmitter(), { updateState: { status: 'idle' } })
+    const development = Object.assign(new EventEmitter(), { state: {} })
+    const controller = new WindowController(runtime as never, development as never)
+    await controller.create()
+    const origin = 'http://127.0.0.1:43123'
+    Object.assign(controller, { harnessOrigin: origin, harnessLifecycle: 'ready' })
+    const outcome = { changed: true, application: 'applied', target: '@sample/demo', enabled: false }
+    const setBundleEnabled = vi.fn(async () => outcome)
+    const globals = { location: { origin }, window: { [Symbol.for('dsh.desktop.plugin-manager.transport.v1')]: { setBundleEnabled } } }
+    const frame = { parent: {}, name: 'harness-frame', url: origin, isDestroyed: () => false,
+      executeJavaScript: vi.fn(async (script: string) => await runInNewContext(script, globals)),
+    }
+    electronMocks.window!.webContents.mainFrame.framesInSubtree = [frame]
+    const request = { profile: 'web', packageName: '@sample/demo', active: false }
+    await expect(controller.setHarnessPluginActive(request)).resolves.toEqual(outcome)
+    expect(setBundleEnabled).toHaveBeenCalledExactlyOnceWith('@sample/demo', false)
+    await expect(controller.setHarnessPluginActive({ ...request, profile: 'cli' })).resolves.toBeUndefined()
+    expect(setBundleEnabled).toHaveBeenCalledOnce()
+    globals.location.origin = 'https://unrelated.example'
+    await expect(controller.setHarnessPluginActive(request)).rejects.toThrow('页面已变更')
+    expect(setBundleEnabled).toHaveBeenCalledOnce()
+    globals.location.origin = origin
+    setBundleEnabled.mockRejectedValueOnce(new Error('official failure'))
+    await expect(controller.setHarnessPluginActive(request)).rejects.toThrow('official failure')
+    Object.assign(controller, { harnessLifecycle: 'starting' })
+    await expect(controller.setHarnessPluginActive(request)).rejects.toThrow('尚未就绪')
+  })
+})
+
 describe('image menu discovery and dispatch', () => {
   async function imageMenuFixture() {
     const runtime = Object.assign(new EventEmitter(), {
@@ -676,10 +707,11 @@ describe('browser page element inspection', () => {
 })
 
 describe('Harness theme preference parsing', () => {
-  it('recognizes explicit and system preferences without matching unrelated settings', () => {
-    expect(parseHarnessThemePreference('ui-theme:\n  preference: system\n')).toBe('system')
-    expect(parseHarnessThemePreference('ui-theme:\r\n  preference: "dark" # keep\r\n')).toBe('dark')
-    expect(parseHarnessThemePreference('other:\n  preference: light\n')).toBeUndefined()
+  it('accepts only the current UI theme source values', () => {
+    for (const value of ['light', 'dark', 'system']) expect(parseHarnessThemePreference(value)).toBe(value)
+    for (const value of [undefined, null, '', 'auto', {}, 'ui-theme:\n  preference: dark\n']) {
+      expect(parseHarnessThemePreference(value)).toBeUndefined()
+    }
   })
 
   it('resolves only the system preference through the operating-system scheme', () => {
@@ -706,6 +738,36 @@ describe('configured native theme synchronization', () => {
     const preference = vi.spyOn(access, 'readConfiguredThemePreference').mockResolvedValue('system')
     return { access, preference, browser }
   }
+
+  it('reads the live Harness frame instead of the retired settings document', async () => {
+    const { access, preference } = fixture()
+    preference.mockRestore()
+    const executeJavaScript = vi.fn().mockResolvedValue('light')
+    vi.spyOn(access, 'findHarnessFrame').mockReturnValue({ executeJavaScript })
+    await expect(access.readConfiguredTheme()).resolves.toBe('light')
+    expect(executeJavaScript).toHaveBeenCalledWith('document.documentElement.getAttribute("data-ds-theme-source")')
+    expect(electronMocks.nativeTheme.source).toBe('light')
+    executeJavaScript.mockResolvedValue('dark')
+    await expect(access.readConfiguredTheme()).resolves.toBe('dark')
+    executeJavaScript.mockResolvedValue('system')
+    electronMocks.nativeTheme.systemDark = false
+    await expect(access.readConfiguredTheme()).resolves.toBe('light')
+    expect(electronMocks.nativeTheme.source).toBe('system')
+  })
+
+  it('retains the current preference while the frame is absent, loading or navigating', async () => {
+    const { access, preference } = fixture()
+    preference.mockRestore()
+    electronMocks.nativeTheme.source = 'light'
+    const frame = vi.spyOn(access, 'findHarnessFrame').mockReturnValue(undefined)
+    await expect(access.readConfiguredTheme()).resolves.toBe('light')
+    const executeJavaScript = vi.fn().mockResolvedValue(null)
+    frame.mockReturnValue({ executeJavaScript })
+    await expect(access.readConfiguredTheme()).resolves.toBe('light')
+    executeJavaScript.mockRejectedValue(new Error('frame destroyed'))
+    await expect(access.readConfiguredTheme()).resolves.toBe('light')
+    expect(electronMocks.nativeTheme.assignments).toEqual([])
+  })
 
   it.each(['dark', 'light'] as const)('synchronizes explicit %s preference to native windows without redundant assignments', async (theme) => {
     electronMocks.nativeTheme.systemDark = theme === 'light'

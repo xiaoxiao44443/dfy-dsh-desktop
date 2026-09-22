@@ -240,6 +240,10 @@ if (!app.requestSingleInstanceLock()) {
     }
     const pluginManagement = new PluginManagementService(runtime.harnessHome, {
       getWindow: () => windows?.getBrowserWindow(),
+      setBundleEnabled: async (request) => {
+        if (windows === undefined) throw new Error('桌面窗口尚未准备完成。')
+        return await windows.setHarnessPluginActive(request)
+      },
       ...(!app.isPackaged && process.env.DFY_PLUGIN_CATALOG_FILE ? { catalogFile: process.env.DFY_PLUGIN_CATALOG_FILE } : {}),
       runPnpm: async (profile, args) => {
         if (harness === undefined) throw new Error('Harness 尚未启动。')

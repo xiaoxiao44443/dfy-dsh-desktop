@@ -3,7 +3,7 @@ import { useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { gt, valid } from 'semver'
 import type { DfyPluginCatalog as Catalog, DfyPluginMutationRequest, ManagedPluginEntry } from '../shared/contracts.js'
-import { DFY_PLUGINS, isDfyRegistrySource } from '../shared/dfy-plugins.js'
+import { DFY_PLUGINS, includedDfyPlugins, isDfyRegistrySource, normalizeDfySelection } from '../shared/dfy-plugins.js'
 
 interface Props {
   plugins: ManagedPluginEntry[]
@@ -23,17 +23,19 @@ export function DfyPluginCatalog({ plugins, query, disabled, catalog, loading, o
   const busy = useRef(false)
 
   const installed = new Map(plugins.map((plugin) => [plugin.name, plugin]))
+  const included = includedDfyPlugins(plugins)
   const entries = catalog?.plugins ?? DFY_PLUGINS
   const versions = new Map(catalog?.releases.map((release) => [release.name, release.version]))
   const registry = (plugin: ManagedPluginEntry): boolean => plugin.sourceType === 'npm' && isDfyRegistrySource(plugin.source)
   const linked = (plugin: ManagedPluginEntry): boolean => plugin.sourceType === 'local' && /^link:/iu.test(plugin.source)
   const installable = (name: string): boolean => {
+    if (included.has(name)) return false
     const plugin = installed.get(name)
     return plugin === undefined || (registry(plugin) && plugin.status === 'missing')
   }
   const matching = entries.filter((plugin) => `${plugin.title} ${plugin.name} ${plugin.description} ${plugin.category}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
   const selectable = matching.filter((plugin) => installable(plugin.name)).map((plugin) => plugin.name)
-  const selection = selected.filter((name) => entries.some((entry) => entry.name === name) && installable(name))
+  const selection = normalizeDfySelection(selected.filter((name) => entries.some((entry) => entry.name === name) && installable(name)), entries)
   const readyPlugins = entries.map(({ name }) => installed.get(name)).filter((plugin): plugin is ManagedPluginEntry => plugin?.status === 'ready')
   const linkCount = readyPlugins.filter(linked).length
   const showSelection = selectable.length > 0 || selection.length > 0
@@ -73,6 +75,8 @@ export function DfyPluginCatalog({ plugins, query, disabled, catalog, loading, o
     <div className="dfy-plugin-grid" aria-busy={loading || pending.length > 0}>
       {matching.map((entry) => {
         const plugin = installed.get(entry.name)
+        const component = included.get(entry.name)
+        const parentTitle = component === undefined ? undefined : entries.find(item => item.name === component.bundle.name)?.title ?? component.bundle.name
         const latest = versions.get(entry.name)
         const canInstall = installable(entry.name)
         const fromNpm = plugin !== undefined && registry(plugin)
@@ -81,7 +85,7 @@ export function DfyPluginCatalog({ plugins, query, disabled, catalog, loading, o
         const sameVersion = fromNpm && latest !== undefined && plugin.version === latest
         const active = pending.includes(entry.name)
         const sourceLabel = fromLink ? '本地链接' : plugin?.sourceType === 'local' ? '本地来源' : plugin?.sourceType === 'git' ? 'Git 来源' : plugin?.sourceType === 'workspace' ? '工作区来源' : '其他来源'
-        const stateLabel = active ? '处理中…' : plugin === undefined ? '未安装' : plugin.status === 'missing' ? fromLink ? '链接失效' : '来源失效' : hasUpdate ? '可更新' : plugin.active ? '已启用' : '已停用'
+        const stateLabel = active ? '处理中…' : component !== undefined ? component.status === 'missing' ? '组件缺失，请修复组合包' : component.bundle.active ? '由组合包管理' : '组合包已停用' : plugin === undefined ? '未安装' : plugin.status === 'missing' ? fromLink ? '链接失效' : '来源失效' : hasUpdate ? '可更新' : plugin.active ? '已启用' : '已停用'
         return <article className={`dfy-plugin-card${selection.includes(entry.name) ? ' selected' : ''}`} key={entry.name}>
           <div className="dfy-plugin-card-title">
             {canInstall ? <label><input type="checkbox" aria-label={`选择${entry.title}`} checked={selection.includes(entry.name)} disabled={locked} onChange={(event) => setSelected((previous) => event.target.checked ? [...new Set([...previous, entry.name])] : previous.filter((name) => name !== entry.name))} /><strong>{entry.title}</strong></label> : <strong className="dfy-plugin-title">{entry.title}</strong>}
@@ -90,9 +94,10 @@ export function DfyPluginCatalog({ plugins, query, disabled, catalog, loading, o
           <p className="dfy-plugin-description">{entry.description}</p>
           <code className="dfy-plugin-package" title={entry.name}>{entry.name}</code>
           {'note' in entry ? <p className="dfy-plugin-note">{entry.note}</p> : null}
+          {component !== undefined ? <p className="dfy-plugin-note">由{parentTitle}提供，随组合包更新。</p> : null}
           <div className="dfy-plugin-card-footer">
             <div className="dfy-plugin-version">
-              {plugin && !fromNpm ? <>
+              {component !== undefined ? <span>{component.version ? `v${component.version}` : '版本未知'}</span> : plugin && !fromNpm ? <>
                 <span className="dfy-plugin-source" title={plugin.source}>{fromLink ? <Link2 aria-hidden="true" /> : null}{sourceLabel}</span>
                 <span>{plugin.version ? `v${plugin.version}` : '版本未知'}</span>
                 {latest && latest !== plugin.version ? <span title="npm 发布版本；本地与 Git 来源需通过各自来源更新">npm {latest}</span> : null}
@@ -103,7 +108,8 @@ export function DfyPluginCatalog({ plugins, query, disabled, catalog, loading, o
               <button className="dfy-github-button" type="button" aria-label={`在 GitHub 查看${entry.title}`} title={`在 GitHub 查看${entry.title}`} onClick={() => onOpenRepository(entry.name)}>
                 <svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor"><path d="M12 .297C5.37 .297 0 5.67 0 12.297c0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.043-1.61-4.043-1.61-.546-1.387-1.333-1.756-1.333-1.756-1.087-.744.083-.729.083-.729 1.205.084 1.838 1.237 1.838 1.237 1.07 1.835 2.809 1.305 3.495.998.108-.776.418-1.305.762-1.605-2.665-.3-5.467-1.334-5.467-5.931 0-1.31.469-2.381 1.236-3.221-.124-.303-.536-1.524.117-3.176 0 0 1.008-.322 3.301 1.23a11.52 11.52 0 0 1 3.003-.404c1.02.005 2.047.138 3.003.404 2.291-1.552 3.297-1.23 3.297-1.23.655 1.652.243 2.873.12 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.628-5.479 5.921.43.372.823 1.102.823 2.222 0 1.606-.015 2.898-.015 3.293 0 .322.216.694.825.576C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" /></svg>
               </button>
-            {canInstall ? <button className="compact-button" type="button" disabled={locked} onClick={() => void mutate('install', [entry.name])}>{active ? '处理中…' : plugin ? '重新安装' : '安装'}</button>
+            {component !== undefined ? <button className="dfy-manage-button" type="button" disabled={locked} onClick={() => onManage(component.bundle.name)}><span>管理组合包</span><ChevronRight aria-hidden="true" /></button>
+              : canInstall ? <button className="compact-button" type="button" disabled={locked} onClick={() => void mutate('install', [entry.name])}>{active ? '处理中…' : plugin ? '重新安装' : '安装'}</button>
               : fromNpm ? <button className="compact-button" type="button" disabled={locked || sameVersion} onClick={() => void mutate('update', [entry.name])}>{active ? '更新中…' : sameVersion ? '已是最新' : '更新'}</button>
                 : <button className="dfy-manage-button" type="button" disabled={locked} onClick={() => onManage(entry.name)}><span>管理</span><ChevronRight aria-hidden="true" /></button>}
             </div>

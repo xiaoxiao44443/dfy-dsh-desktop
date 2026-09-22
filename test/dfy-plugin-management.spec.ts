@@ -9,7 +9,7 @@ import type { DfyPluginDefinition, DfyPluginMutationRequest } from '../src/share
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))) })
 const wallpaper = '@dfy-plugins/dsh-wallpaper'
-const vision = '@dfy-plugins/dsh-vision'
+const turnGuard = '@dfy-plugins/dsh-turn-guard'
 
 async function fixture(dependencies: Record<string, string> = {}, plugins: DfyPluginDefinition[] = DFY_PLUGINS) {
   const home = await mkdtemp(join(tmpdir(), 'dfy-catalog-test-'))
@@ -26,7 +26,6 @@ async function fixture(dependencies: Record<string, string> = {}, plugins: DfyPl
     for (const arg of args.slice(1).filter((arg) => arg.startsWith('@dfy-plugins/'))) {
       const name = arg.replace(/@latest$/u, '')
       manifest.dependencies[name] = '^0.1.3'
-      manifest.dsh.profile.bundles.push(name)
       const dir = join(profileDir, 'node_modules', name)
       await mkdir(dir, { recursive: true })
       await writeFile(join(dir, 'package.json'), JSON.stringify({ name, version: '0.1.3', dsh: { bundle: { patch: './cordis.patch.yml' } } }))
@@ -43,25 +42,25 @@ async function fixture(dependencies: Record<string, string> = {}, plugins: DfyPl
 
 describe('DFY catalog operations', () => {
   it('installs a deduplicated selection in one command and preserves disabled plugins', async () => {
-    const { service, runPnpm } = await fixture()
-    const result = await service.mutateDfyPlugins({ profile: 'web', action: 'install', packageNames: [wallpaper, vision, wallpaper] })
-    expect(runPnpm).toHaveBeenCalledExactlyOnceWith('web', ['add', `${wallpaper}@latest`, `${vision}@latest`, '--registry=https://registry.npmjs.org'])
+    const { service, runPnpm } = await fixture({ [wallpaper]: '^0.1.2' })
+    const result = await service.mutateDfyPlugins({ profile: 'web', action: 'install', packageNames: [wallpaper, turnGuard, wallpaper] })
+    expect(runPnpm).toHaveBeenCalledExactlyOnceWith('web', ['add', `${wallpaper}@latest`, `${turnGuard}@latest`, '--registry=https://registry.npmjs.org'])
     expect(result.exitCode).toBe(0)
     expect(result.inventory.profiles[0]?.plugins).toEqual(expect.arrayContaining([
-      expect.objectContaining({ name: wallpaper, active: false }), expect.objectContaining({ name: vision, active: true }),
+      expect.objectContaining({ name: wallpaper, active: false }), expect.objectContaining({ name: turnGuard, active: true }),
     ]))
   })
 
   it('updates only selected installed registry packages across version ranges', async () => {
-    const { service, runPnpm } = await fixture({ [wallpaper]: '^0.1.0', [vision]: 'latest', '@sample/plugin': '^1.0.0' })
-    await service.mutateDfyPlugins({ profile: 'web', action: 'update', packageNames: [wallpaper, vision] })
-    expect(runPnpm).toHaveBeenCalledExactlyOnceWith('web', ['update', wallpaper, vision, '--latest', '--registry=https://registry.npmjs.org'])
+    const { service, runPnpm } = await fixture({ [wallpaper]: '^0.1.0', [turnGuard]: 'latest', '@sample/plugin': '^1.0.0' })
+    await service.mutateDfyPlugins({ profile: 'web', action: 'update', packageNames: [wallpaper, turnGuard] })
+    expect(runPnpm).toHaveBeenCalledExactlyOnceWith('web', ['update', wallpaper, turnGuard, '--latest', '--registry=https://registry.npmjs.org'])
   })
 
   it.each(['link:/local/dev', 'workspace:*', 'github:owner/repo', 'https://example.com/plugin.tgz', 'npm:other-package@latest'])(
     'preserves an existing %s source even when grouped with uninstalled plugins', async (source) => {
       const { service, runPnpm } = await fixture({ [wallpaper]: source })
-      await expect(service.mutateDfyPlugins({ profile: 'web', action: 'install', packageNames: [vision, wallpaper] })).rejects.toThrow('已安装')
+      await expect(service.mutateDfyPlugins({ profile: 'web', action: 'install', packageNames: [turnGuard, wallpaper] })).rejects.toThrow('已安装')
       await expect(service.mutateDfyPlugins({ profile: 'web', action: 'update', packageNames: [wallpaper] })).rejects.toThrow('已安装')
       expect(runPnpm).not.toHaveBeenCalled()
     },
@@ -90,15 +89,15 @@ describe('DFY catalog operations', () => {
       if (String(input) === DFY_PLUGIN_CATALOG_URL) return Response.json({ version: 1, plugins: DFY_PLUGINS })
       const name = decodeURIComponent(new URL(String(input)).pathname.split('/')[1]!)
       if (name === wallpaper) return Response.json({ name, version: '0.1.3' })
-      if (name === vision) throw new Error('offline')
+      if (name === turnGuard) throw new Error('offline')
       return Response.json({ name: 'wrong-package', version: 'invalid' })
     }) as unknown as typeof fetch
     const service = new PluginManagementService('/unused', { getWindow: () => undefined, runPnpm: vi.fn(), fetch: request })
     const catalog = await service.getDfyCatalog()
     expect(catalog.releases).toHaveLength(DFY_PLUGINS.length)
     expect(catalog.releases.find(({ name }) => name === wallpaper)?.version).toBe('0.1.3')
-    expect(catalog.releases.find(({ name }) => name === vision)?.version).toBeUndefined()
-    expect(catalog.error).toContain('8 个插件')
+    expect(catalog.releases.find(({ name }) => name === turnGuard)?.version).toBeUndefined()
+    expect(catalog.error).toContain(`${DFY_PLUGINS.length - 1} 个插件`)
   })
 
   it('discovers and installs a newly listed plugin without a desktop allowlist change', async () => {

@@ -29,6 +29,14 @@ describe('plugin initialization recovery', () => {
     })
   })
 
+  it('recognizes current startup failures and ignores dependent pending entries', () => {
+    expect(parsePluginInitializationFailure('dsh: warning: 2 entries did not activate\nwallpaper (@dfy-plugins/dsh-wallpaper): TypeError: invalid config\nclient (dsh-client): pending (waiting for service: wallpaper)')).toMatchObject({
+      entryId: 'wallpaper', pluginName: '@dfy-plugins/dsh-wallpaper', detail: 'TypeError: invalid config', recoverable: true,
+    })
+    expect(parsePluginInitializationFailure('dsh: warning: 1 entry did not activate\nworkspace (@deepseek-ai/dsh-workspace): Error: damaged history')).toMatchObject({ recoverable: false })
+    expect(parsePluginInitializationFailure('wallpaper (@dfy-plugins/dsh-wallpaper): Error: ordinary tool output')).toBeUndefined()
+  })
+
   it('writes disabled entries as a final patch and restores them later', async () => {
     const root = await mkdtemp(join(tmpdir(), 'desktop-plugin-recovery-'))
     temporaryPaths.push(root)

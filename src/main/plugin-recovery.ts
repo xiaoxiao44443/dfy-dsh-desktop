@@ -3,6 +3,8 @@ import { dirname } from 'node:path'
 import type { PluginInitializationFailure, PluginRecoveryEntry } from '../shared/contracts.js'
 
 const PLUGIN_FAILURE_PATTERN = /failed to (?:import|apply|dispose|rollback) loader entry\s+([^\s(]+)\s+\(([^)\r\n]+)\):\s*([^\r\n]+)/giu
+// DSH 0.1.7 reports inactive entries as one row followed by its stack trace.
+const INACTIVE_ENTRY_PATTERN = /^([^\s(]+)\s+\(([^)\r\n]+)\):\s*((?:[A-Za-z]*Error|AggregateError):[^\r\n]+)/gmu
 const DESKTOP_BRIDGE_ENTRY_ID = 'desktop-bridge'
 const DESKTOP_BRIDGE_PLUGIN_NAME = 'dsh-desktop-bridge'
 
@@ -22,6 +24,11 @@ export class PluginInitializationError extends Error {
 export function parsePluginInitializationFailure(output: string): PluginInitializationFailure | undefined {
   let latest: RegExpExecArray | null = null
   for (const match of output.matchAll(PLUGIN_FAILURE_PATTERN)) latest = match
+  if (/dsh: warning: \d+ (?:entry|entries) did not activate/u.test(output)) {
+    for (const match of output.matchAll(INACTIVE_ENTRY_PATTERN)) {
+      if (latest === null || (match.index ?? 0) > (latest.index ?? 0)) latest = match
+    }
+  }
   if (latest === null) return undefined
   const entryId = latest[1]?.trim()
   const pluginName = latest[2]?.trim()
@@ -31,7 +38,9 @@ export function parsePluginInitializationFailure(output: string): PluginInitiali
     entryId,
     pluginName,
     detail: detail.slice(0, 1_000),
-    recoverable: entryId !== DESKTOP_BRIDGE_ENTRY_ID && pluginName !== DESKTOP_BRIDGE_PLUGIN_NAME,
+    recoverable: entryId !== DESKTOP_BRIDGE_ENTRY_ID
+      && pluginName !== DESKTOP_BRIDGE_PLUGIN_NAME
+      && !pluginName.startsWith('@deepseek-ai/'),
   }
 }
 

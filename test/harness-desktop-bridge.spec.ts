@@ -253,7 +253,7 @@ describe('dsh-desktop-bridge tool', () => {
     expect(concludeTurn).not.toHaveBeenCalled()
   })
 
-  it('publishes restart-required context after the active Profile changes', async () => {
+  it.each([false, true])('tracks package changes but respects official hot switches (HMR: %s)', async (live) => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-desktop-profile-'))
     temporaryPaths.push(root)
     const profilePath = join(root, 'profiles', 'web')
@@ -263,7 +263,10 @@ describe('dsh-desktop-bridge tool', () => {
     const registeredContexts: Array<{ text: () => string }> = []
     const emit = vi.fn()
     const registerRoute = vi.fn()
+    // HMR becomes available after the bridge, as it may during startup.
+    let hmr: object | undefined
     const cleanup = await apply({
+      get: (name: string) => name === 'hmr' ? hmr : undefined,
       tools: { register: vi.fn() },
       webServer: { register: registerRoute },
       systemPrompt: {
@@ -287,9 +290,19 @@ describe('dsh-desktop-bridge tool', () => {
     ])
 
     expect(registeredContexts[0]?.text()).toBe('')
+    if (live) hmr = {}
+    await writeFile(join(profilePath, 'package.json'), '{"dependencies":{},"dsh":{"profile":{"bundles":["core"]}}}\n', 'utf8')
+    await writeFile(join(profilePath, 'cordis.patch.yml'), '- id: demo\n  disabled: true\n', 'utf8')
+    if (live) {
+      await new Promise(resolve => setTimeout(resolve, 700))
+      expect(registeredContexts[0]?.text()).toBe('')
+      expect(emit).not.toHaveBeenCalled()
+    } else {
+      await vi.waitFor(() => expect(registeredContexts[0]?.text()).toContain('active web Profile changed'))
+    }
     await writeFile(join(profilePath, 'package.json'), '{"dependencies":{"greet":"1.0.0"}}\n', 'utf8')
-    await vi.waitFor(() => expect(emit).toHaveBeenCalledWith('system-prompt/change'))
-    expect(registeredContexts[0]?.text()).toContain('active web Profile changed')
+    await vi.waitFor(() => expect(registeredContexts[0]?.text()).toContain('active web Profile changed'))
+    expect(emit).toHaveBeenCalledWith('system-prompt/change')
     cleanup()
   })
 })

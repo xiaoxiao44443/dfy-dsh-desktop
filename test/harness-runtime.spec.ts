@@ -5,6 +5,7 @@ import { c as createTar } from 'tar'
 import { describe, expect, it, vi } from 'vitest'
 import {
   bundledArchiveProgress,
+  supportsHarnessVersion,
   HarnessRuntimeManager,
   pnpmInstallProgress,
   repairWindowsPnpmArchiveLinks,
@@ -50,7 +51,7 @@ describe('bundled Harness archive progress', () => {
       const dshRoot = join(source, 'node_modules', '@deepseek-ai', 'dsh')
       await mkdir(join(dshRoot, 'lib'), { recursive: true })
       await mkdir(join(source, 'node_modules', 'pnpm', 'bin'), { recursive: true })
-      await writeFile(join(dshRoot, 'package.json'), JSON.stringify({ version: '0.1.0' }))
+      await writeFile(join(dshRoot, 'package.json'), JSON.stringify({ version: '0.1.7-alpha.1' }))
       await writeFile(join(dshRoot, 'lib', 'bin.js'), 'export {}\n')
       await writeFile(join(source, 'node_modules', 'pnpm', 'bin', 'pnpm.cjs'), '#!/usr/bin/env node\n')
 
@@ -159,10 +160,10 @@ describe('Harness runtime storage cleanup', () => {
       const userData = join(root, 'user-data')
       const runtimeRoot = join(userData, 'harness-runtime')
       const bundledRoot = join(runtimeRoot, 'bundled')
-      const currentBundle = join(bundledRoot, 'desktop-0.1.0-rc.7')
+      const currentBundle = join(bundledRoot, 'desktop-0.1.7-alpha.1')
       const oldBundle = join(bundledRoot, 'desktop-0.1.0')
       const versionsRoot = join(runtimeRoot, 'versions')
-      const duplicateVersion = join(versionsRoot, '0.1.0-rc.7')
+      const duplicateVersion = join(versionsRoot, '0.1.7-alpha.1')
       const pendingVersion = join(versionsRoot, '0.2.0')
       const orphanedVersion = join(versionsRoot, '0.3.0')
       const npmCache = join(runtimeRoot, 'npm-cache')
@@ -170,9 +171,9 @@ describe('Harness runtime storage cleanup', () => {
       const stagingRoot = join(runtimeRoot, 'staging')
 
       await Promise.all([
-        writeRuntimeFixture(currentBundle, '0.1.0-rc.7'),
+        writeRuntimeFixture(currentBundle, '0.1.7-alpha.1'),
         writeRuntimeFixture(oldBundle, '0.1.0-rc.6'),
-        writeRuntimeFixture(duplicateVersion, '0.1.0-rc.7'),
+        writeRuntimeFixture(duplicateVersion, '0.1.7-alpha.1'),
         writeRuntimeFixture(pendingVersion, '0.2.0'),
         writeRuntimeFixture(orphanedVersion, '0.3.0'),
         mkdir(join(npmCache, '_cacache'), { recursive: true }),
@@ -184,7 +185,7 @@ describe('Harness runtime storage cleanup', () => {
       await writeFile(join(stagingRoot, 'abandoned-install', 'package.json'), '{}')
       await writeFile(join(runtimeRoot, 'state.json'), `${JSON.stringify({
         schemaVersion: 1,
-        activeVersion: '0.1.0-rc.7',
+        activeVersion: '0.1.7-alpha.1',
         pendingVersion: '0.2.0',
         badVersions: {
           '0.1.0-rc.6': { failedAt: '2026-08-01T00:00:00.000Z', reason: 'old failure' },
@@ -225,7 +226,7 @@ describe('Harness runtime update policy', () => {
     try {
       const userData = join(root, 'user-data')
       const bundledRoot = join(root, 'bundled')
-      await writeRuntimeFixture(bundledRoot, '0.1.0-rc.8')
+      await writeRuntimeFixture(bundledRoot, '0.1.7-alpha.2')
       const manager = new HarnessRuntimeManager(userData, process.execPath, bundledRoot)
       await manager.initialize()
       const installVersion = vi.fn(async () => undefined)
@@ -234,20 +235,24 @@ describe('Harness runtime update policy', () => {
         ok: true,
         json: async () => ({
           'dist-tags': {
-            latest: '0.1.0-rc.9',
-            next: '0.1.0-rc.9',
-            alpha: '0.1.0-rc.8',
-            preview: '0.1.0-rc.8',
+            latest: '0.1.7-rc.1',
+            next: '0.1.7-rc.1',
+            alpha: '0.1.7-alpha.2',
+            preview: '0.1.7-alpha.2',
+            legacy: '0.1.6-alpha.1',
           },
           versions: {
-            '0.1.0-rc.7': {},
-            '0.1.0-rc.8': {},
-            '0.1.0-rc.9': {},
+            '0.1.5-rc.2': {},
+            '0.1.6-alpha.1': {},
+            '0.1.7-alpha.0': {},
+            '0.1.7-alpha.1': {},
+            '0.1.7-alpha.2': {},
+            '0.1.7-rc.1': {},
           },
           time: {
-            '0.1.0-rc.7': '2026-08-17T00:00:00.000Z',
-            '0.1.0-rc.8': '2026-08-18T00:00:00.000Z',
-            '0.1.0-rc.9': '2026-08-19T00:00:00.000Z',
+            '0.1.7-alpha.1': '2026-08-17T00:00:00.000Z',
+            '0.1.7-alpha.2': '2026-08-18T00:00:00.000Z',
+            '0.1.7-rc.1': '2026-08-19T00:00:00.000Z',
           },
         }),
       })))
@@ -256,12 +261,12 @@ describe('Harness runtime update policy', () => {
 
       expect(manager.updateState).toMatchObject({
         status: 'available',
-        version: '0.1.0-rc.9',
-        latestVersion: '0.1.0-rc.9',
+        version: '0.1.7-rc.1',
+        latestVersion: '0.1.7-rc.1',
         versions: [
-          { version: '0.1.0-rc.9', publishedAt: '2026-08-19T00:00:00.000Z', distTags: ['latest', 'next'] },
-          { version: '0.1.0-rc.8', publishedAt: '2026-08-18T00:00:00.000Z', distTags: ['alpha', 'preview'] },
-          { version: '0.1.0-rc.7', publishedAt: '2026-08-17T00:00:00.000Z' },
+          { version: '0.1.7-rc.1', publishedAt: '2026-08-19T00:00:00.000Z', distTags: ['latest', 'next'] },
+          { version: '0.1.7-alpha.2', publishedAt: '2026-08-18T00:00:00.000Z', distTags: ['alpha', 'preview'] },
+          { version: '0.1.7-alpha.1', publishedAt: '2026-08-17T00:00:00.000Z' },
         ],
         message: '发现新版本，可选择版本下载安装',
       })
@@ -273,17 +278,17 @@ describe('Harness runtime update policy', () => {
 
       await manager.checkForUpdates()
 
-      expect(installVersion).toHaveBeenCalledWith('0.1.0-rc.9', expect.any(Function))
-      expect(manager.updateState).toMatchObject({ status: 'ready', version: '0.1.0-rc.9' })
+      expect(installVersion).toHaveBeenCalledWith('0.1.7-rc.1', expect.any(Function))
+      expect(manager.updateState).toMatchObject({ status: 'ready', version: '0.1.7-rc.1' })
       await manager.markHealthy({
-        version: '0.1.0-rc.9',
+        version: '0.1.7-rc.1',
         entryPath: '/managed/dsh/lib/bin.js',
         source: 'managed',
         pending: true,
       })
       expect(manager.updateState).toMatchObject({
         status: 'current',
-        version: '0.1.0-rc.9',
+        version: '0.1.7-rc.1',
         message: '当前正在使用这个版本',
       })
       state = JSON.parse(await readFile(join(userData, 'harness-runtime', 'state.json'), 'utf8')) as {
@@ -301,7 +306,7 @@ describe('Harness runtime update policy', () => {
     try {
       const userData = join(root, 'user-data')
       const bundledRoot = join(root, 'bundled')
-      await writeRuntimeFixture(bundledRoot, '0.1.0-rc.8')
+      await writeRuntimeFixture(bundledRoot, '0.1.7-alpha.2')
       const manager = new HarnessRuntimeManager(userData, process.execPath, bundledRoot)
       await manager.initialize()
       ;(manager as unknown as { installVersion: (version: string, onProgress: (progress: number, message: string) => void) => Promise<void> }).installVersion = async (version, onProgress) => {
@@ -311,37 +316,50 @@ describe('Harness runtime update policy', () => {
       vi.stubGlobal('fetch', vi.fn(async () => ({
         ok: true,
         json: async () => ({
-          'dist-tags': { latest: '0.1.0-rc.9' },
+          'dist-tags': { latest: '0.1.7-rc.1' },
           versions: {
-            '0.1.0-rc.7': {},
-            '0.1.0-rc.8': {},
-            '0.1.0-rc.9': {},
+            '0.1.7-alpha.1': {},
+            '0.1.7-alpha.2': {},
+            '0.1.7-rc.1': {},
           },
         }),
       })))
 
       await manager.checkForUpdates({ download: false })
-      await manager.installHarnessVersion('0.1.0-rc.7')
+      await manager.installHarnessVersion('0.1.7-alpha.1')
 
       expect(manager.updateState).toMatchObject({
         status: 'ready',
-        version: '0.1.0-rc.7',
+        version: '0.1.7-alpha.1',
         progress: 100,
       })
 
       const restarted = new HarnessRuntimeManager(userData, process.execPath, bundledRoot)
       await restarted.initialize()
       let candidates = await restarted.launchCandidates()
-      expect(candidates[0]).toMatchObject({ version: '0.1.0-rc.7', source: 'managed', pending: true })
+      expect(candidates[0]).toMatchObject({ version: '0.1.7-alpha.1', source: 'managed', pending: true })
       await restarted.markHealthy(candidates[0])
 
       const launchedAgain = new HarnessRuntimeManager(userData, process.execPath, bundledRoot)
       await launchedAgain.initialize()
       candidates = await launchedAgain.launchCandidates()
-      expect(candidates[0]).toMatchObject({ version: '0.1.0-rc.7', source: 'managed', pending: false })
+      expect(candidates[0]).toMatchObject({ version: '0.1.7-alpha.1', source: 'managed', pending: false })
     } finally {
       vi.unstubAllGlobals()
       await rm(root, { recursive: true, force: true })
     }
+  })
+})
+
+
+describe('supported Harness versions', () => {
+  it('rejects lower prereleases and accepts the minimum and later releases', () => {
+    for (const version of ['0.1.5-rc.2', '0.1.6', '0.1.7-alpha.0', 'invalid']) expect(supportsHarnessVersion(version)).toBe(false)
+    for (const version of ['0.1.7-alpha.1', '0.1.7-alpha.2', '0.1.7', '0.1.8-alpha.1']) expect(supportsHarnessVersion(version)).toBe(true)
+  })
+
+  it('refuses manual installs below the minimum before running package commands', async () => {
+    const manager = new HarnessRuntimeManager('/unused', process.execPath)
+    await expect(manager.installHarnessVersion('0.1.6-alpha.1')).rejects.toThrow('0.1.7-alpha.1')
   })
 })

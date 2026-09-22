@@ -55,19 +55,50 @@ function observable<T>(initial: T) {
   }
 }
 
-function notificationContext(modern = true) {
-  const list = observable({ byId: { one: { displayTitle: '测试对话', running: true, updatedAt: 1 } } } as { byId: Record<string, Record<string, unknown>> })
-  const interactions = observable(new Map<string, Record<string, unknown>>())
-  const session = observable<Record<string, unknown>>({ nodes: [] })
+it('bridges official plugin switches and withdraws only its own transport on reload', async () => {
+  const client = await loadClientModule()
+  const install = client.installPluginManagerTransport as (remote: unknown) => () => void
+  const outcome = { changed: true, application: 'applied' }
+  const setBundleEnabled = vi.fn(async () => outcome)
+  const key = Symbol.for('dsh.desktop.plugin-manager.transport.v1')
+  const target = window as unknown as Record<symbol, { setBundleEnabled(name: string, enabled: boolean): Promise<unknown> }>
+  const first = install({ pluginManager: { setBundleEnabled } })
+  expect(await target[key]!.setBundleEnabled('@dfy-plugins/dsh-wallpaper', false)).toEqual(outcome)
+  expect(setBundleEnabled).toHaveBeenCalledExactlyOnceWith('@dfy-plugins/dsh-wallpaper', false)
+  const second = install({ pluginManager: { setBundleEnabled } })
+  first()
+  expect(target[key]).toBeDefined()
+  setBundleEnabled.mockRejectedValueOnce(new Error('permission denied'))
+  await expect(target[key]!.setBundleEnabled('demo', true)).rejects.toThrow('permission denied')
+  second()
+  expect(target[key]).toBeUndefined()
+})
+
+function chatSnapshot(nodes: Array<Record<string, unknown>>) {
+  const entries = nodes.map((node, index) => ({
+    key: String(node.seq ?? index), kind: 'assistant-step', data: { blocks: node.blocks ?? [] },
+  }))
+  return { order: entries.map(node => node.key), nodes: new Map(entries.map(node => [node.key, node])) }
+}
+
+function notificationContext() {
+  const list = observable({ byId: { one: { displayTitle: '测试对话', updatedAt: 1 } } } as { byId: Record<string, Record<string, unknown>> })
+  const statuses = observable(new Map<string, Record<string, unknown>>([['one', { running: true }]]))
+  const chat = observable(chatSnapshot([]))
+  const interactions = {
+    set(value: Map<string, Record<string, unknown>>) {
+      statuses.set(new Map([...statuses.getSnapshot()].map(([id, status]) => [id, { ...status, pendingInteraction: value.get(id) }])))
+    },
+  }
   const cleanups: Array<() => void> = []
   const ctx = {
-    sessions: { list, binding: () => ({ session }) },
+    sessions: { list, binding: () => ({}) },
+    uiSession: { sessionStatus: statuses },
+    uiConversation: { binding: () => ({ activate: vi.fn(), target: () => chat }) },
     effect(setup: () => () => void) { const cleanup = setup(); cleanups.push(cleanup); return cleanup },
-    inject: vi.fn((_dependencies: string[], callback: (ctx: unknown) => void) => {
-      if (modern) callback({ ...ctx, uiSession: { pendingInteractions: interactions } })
-    }),
   }
-  return { ctx, list, interactions, session, dispose: () => { for (const cleanup of cleanups.splice(0)) cleanup() } }
+  return { ctx, list, statuses, interactions, chat, dispose: () => { for (const cleanup of cleanups.splice(0)) cleanup() } }
+
 }
 
 type NotificationApproval = { token: string; interactionKey: string }
@@ -94,24 +125,24 @@ function loadOfficialApprovalClient(): { apply(ctx: unknown): void } {
 describe('desktop notification session transitions', () => {
   it('reports missing session selection and preserves successful navigation and cleanup', async () => {
     const client = await loadClientModule()
-    const install = client.installSessionOpenFeedback as (sessions: { open(id: string): void }, report: (message: string) => void) => () => void
+    const install = client.installSessionOpenFeedback as (sessions: { openSession(id: string): void }, report: (message: string) => void) => () => void
     const report = vi.fn()
     const sessions = {
       current: '',
-      open(id: string) {
+      openSession(id: string) {
         if (id === 'missing') throw new Error('sessions.select: unknown session missing')
         this.current = id
       },
     }
-    const original = sessions.open
+    const original = sessions.openSession
     const dispose = install(sessions, report)
-    expect(() => sessions.open('missing')).not.toThrow()
+    expect(() => sessions.openSession('missing')).not.toThrow()
     expect(report).toHaveBeenCalledWith(expect.stringContaining('当前没有对应的会话记录'))
-    sessions.open('existing')
+    sessions.openSession('existing')
     expect(sessions.current).toBe('existing')
     expect(report).toHaveBeenCalledTimes(1)
     dispose()
-    expect(sessions.open).toBe(original)
+    expect(sessions.openSession).toBe(original)
   })
 
   it('provides the context-menu registry as a lifecycle-owned Cordis Service', async () => {
@@ -196,320 +227,65 @@ describe('desktop notification session transitions', () => {
     await root.fiber.dispose()
   })
 
-  it('suppresses the baseline and reports completion only after a running transition', async () => {
+  it('uses unified status independently of the session list and ignores unknown running state', async () => {
     const client = await loadClientModule()
-    const project = client.projectSessions as (value: unknown) => Map<string, unknown>
-    const diff = client.diffSessionNotifications as (
-      previous: Map<string, unknown>,
-      next: Map<string, unknown>,
-    ) => Array<Record<string, unknown>>
-    const initial = project({ byId: {
-      one: { id: 'one', displayTitle: '旧对话', running: false, completed: true, updatedAt: 1 },
-    } })
-    expect(diff(new Map(), initial)).toEqual([])
-
-    const running = project({ byId: {
-      one: { id: 'one', displayTitle: '测试对话', running: true, updatedAt: 2 },
-    } })
-    const finished = project({ byId: {
-      one: { id: 'one', displayTitle: '测试对话', running: false, updatedAt: 3 },
-    } })
-    expect(diff(running, finished)).toEqual([{
-      kind: 'turn-complete',
-      sessionId: 'one',
-      sessionTitle: '测试对话',
-      key: 'turn-complete:one:3',
-    }])
+    const project = client.projectSessions as (list: unknown, statuses: unknown) => Map<string, unknown>
+    const diff = client.diffSessionNotifications as (before: unknown, after: unknown) => unknown[]
+    const list = { byId: { one: { displayTitle: '测试', running: false, updatedAt: 3 } } }
+    const running = project(list, new Map([['one', { running: true }]]))
+    expect(diff(new Map(), running)).toEqual([])
+    expect(diff(running, project(list, new Map([['one', { running: undefined }]])))).toEqual([])
+    expect(diff(running, project(list, new Map([['one', { running: false }]])))).toMatchObject([{ kind: 'turn-complete' }])
+    expect(diff(running, project(list, new Map([['one', { running: false, pendingInteraction: { kind: 'approval', key: 'a' } }]])))).toMatchObject([{ kind: 'approval' }])
   })
 
-  it('extracts the latest finalized assistant text for a completion preview', async () => {
+  it('extracts text from current Chat nodes and waits for a new assistant key', async () => {
     const client = await loadClientModule()
-    const latestReply = client.latestAssistantReply as (binding: unknown) => string | undefined
-    const binding = {
-      session: {
-        getSnapshot: () => ({
-          nodes: [
-            { kind: 'assistant', blocks: [{ kind: 'text', text: '较早的回复' }] },
-            { kind: 'assistant', blocks: [{ kind: 'reasoning', text: '内部思考' }, { kind: 'text', text: '  你的图片已可查看  ' }] },
-          ],
-        }),
-      },
-    }
-
-    expect(latestReply(binding)).toBe('你的图片已可查看')
-    expect(latestReply({
-      session: {
-        getSnapshot: () => ({
-          nodes: [
-            { kind: 'assistant', blocks: [{ kind: 'text', text: '上一轮回复' }] },
-            { kind: 'assistant', blocks: [{ kind: 'image', attachment: {} }] },
-          ],
-        }),
-      },
-    })).toBeUndefined()
-    expect(latestReply(undefined)).toBeUndefined()
+    const latest = client.latestAssistantReply as (binding: unknown) => string | undefined
+    const marker = client.latestAssistantMarker as (binding: unknown) => unknown
+    const wait = client.waitForAssistantReply as (binding: unknown, baseline: unknown, timeout: number) => Promise<string | undefined>
+    const chat = observable(chatSnapshot([{ seq: 1, blocks: [{ kind: 'text', text: '旧回复' }] }]))
+    const binding = { chat }
+    expect(latest(binding)).toBe('旧回复')
+    const pending = wait(binding, marker(binding), 100)
+    chat.set(chatSnapshot([{ seq: 2, blocks: [{ kind: 'reasoning', text: '内部思考' }, { kind: 'text', text: ' 新回复 ' }] }]))
+    await expect(pending).resolves.toBe('新回复')
+    expect(chat.listeners.size).toBe(0)
+    chat.set(chatSnapshot([{ seq: 3, blocks: [{ kind: 'image' }] }]))
+    expect(latest(binding)).toBeUndefined()
   })
 
-  it('waits for the finalized assistant message after the list reports completion', async () => {
-    const client = await loadClientModule()
-    const markerOf = client.latestAssistantMarker as (binding: unknown) => unknown
-    const waitForReply = client.waitForAssistantReply as (
-      binding: unknown,
-      baseline: unknown,
-      timeoutMs?: number,
-    ) => Promise<string | undefined>
-    let snapshot = {
-      nodes: [{ kind: 'assistant', seq: 1, blocks: [{ kind: 'text', text: '上一轮回复' }] }],
-    }
-    const listeners = new Set<() => void>()
-    const binding = {
-      session: {
-        getSnapshot: () => snapshot,
-        subscribe: (listener: () => void) => {
-          listeners.add(listener)
-          return () => listeners.delete(listener)
-        },
-      },
-    }
-    const baseline = markerOf(binding)
-    const pending = waitForReply(binding, baseline, 100)
-    snapshot = {
-      nodes: [
-        ...snapshot.nodes,
-        { kind: 'assistant', seq: 2, blocks: [{ kind: 'text', text: '这一轮的最终回复' }] },
-      ],
-    }
-    for (const listener of listeners) listener()
-
-    await expect(pending).resolves.toBe('这一轮的最终回复')
-    expect(listeners.size).toBe(0)
-  })
-
-  it('extracts safe summaries from approval, question, and plan-review waits', async () => {
-    const client = await loadClientModule()
-    const summarize = client.pendingInteractionSummary as (
-      binding: unknown,
-      status: 'approval' | 'question' | 'plan-review',
-    ) => string | undefined
-    const binding = {
-      session: {
-        getSnapshot: () => ({
-          pending: [
-            { kind: 'approval', payload: { toolName: 'Bash', callId: 'private-call-id', reason: '运行项目测试' } },
-            { kind: 'question', payload: { questions: [{
-              id: 'q1',
-              header: '输出尺寸',
-              question: '你希望生成哪种尺寸？',
-            }] } },
-          ],
-        }),
-      },
-    }
-    const planBinding = {
-      session: {
-        getSnapshot: () => ({
-          pending: [{ kind: 'question', payload: { questions: [{
-            id: 'plan',
-            question: '请审核实施计划',
-            detail: '# 内部详细计划',
-            intent: { kind: 'plan-review', approve: '批准' },
-          }] } }],
-        }),
-      },
-    }
-
-    expect(summarize(binding, 'approval')).toBe('Bash：运行项目测试')
-    expect(summarize(binding, 'question')).toBe('输出尺寸：你希望生成哪种尺寸？')
-    expect(summarize(planBinding, 'plan-review')).toBe('请审核实施计划')
-  })
-
-  it('prioritizes approval, question, and plan-review interactions', async () => {
-    const client = await loadClientModule()
-    const project = client.projectSessions as (value: unknown) => Map<string, unknown>
-    const diff = client.diffSessionNotifications as (
-      previous: Map<string, unknown>,
-      next: Map<string, unknown>,
-    ) => Array<Record<string, unknown>>
-    const previous = project({ byId: {
-      approval: { displayTitle: 'A', running: true, updatedAt: 1 },
-      question: { displayTitle: 'Q', running: true, updatedAt: 1 },
-      plan: { displayTitle: 'P', running: true, updatedAt: 1 },
-    } })
-    const next = project({ byId: {
-      approval: { displayTitle: 'A', running: false, pendingInteraction: 'approval', updatedAt: 2 },
-      question: { displayTitle: 'Q', running: true, pendingInteraction: 'question', updatedAt: 2 },
-      plan: { displayTitle: 'P', running: true, pendingInteraction: 'plan-review', updatedAt: 2 },
-    } })
-    expect(diff(previous, next).map((event) => event.kind)).toEqual(['approval', 'question', 'plan-review'])
-  })
-
-  it('reports an interaction that first appears with a newly created session', async () => {
-    const client = await loadClientModule()
-    const project = client.projectSessions as (value: unknown) => Map<string, unknown>
-    const diff = client.diffSessionNotifications as (
-      previous: Map<string, unknown>,
-      next: Map<string, unknown>,
-    ) => Array<Record<string, unknown>>
-    const next = project({ byId: {
-      newSession: {
-        displayTitle: '新对话',
-        running: true,
-        pendingInteraction: 'question',
-        updatedAt: 2,
-      },
-    } })
-
-    expect(diff(new Map(), next)).toEqual([{
-      kind: 'question',
-      sessionId: 'newSession',
-      sessionTitle: '新对话',
-      key: 'question:newSession:2',
-    }])
-  })
-
-  it('notifies from the rc.1 interaction store without list changes and distinguishes consecutive approval keys', async () => {
+  it('deduplicates interaction keys, summarizes questions and cancels delayed completions', async () => {
     const client = await loadClientModule()
     const install = client.installSessionNotifications as (ctx: unknown, send: (value: unknown) => Promise<void>) => void
     const source = notificationContext()
     const send = vi.fn(async (_value: unknown) => {})
     install(source.ctx, send)
-    const approval = { key: 'approval:1', kind: 'approval', sessionId: 'one', toolName: 'desktop_restart_harness', reason: '加载浏览器修复' }
-    source.interactions.set(new Map([['one', approval]]))
-    source.interactions.set(new Map([['one', { ...approval }]]))
-    source.list.set({ byId: { one: { displayTitle: '已改标题', running: true, updatedAt: 2, pendingInteraction: 'approval' } } })
-    source.interactions.set(new Map([['one', { ...approval, key: 'approval:2', reason: '加载通知修复' }]]))
-    expect(send.mock.calls.map(([value]) => value)).toEqual([
-      { kind: 'approval', sessionId: 'one', sessionTitle: '测试对话', key: 'approval:one:approval:1', summary: 'desktop_restart_harness：加载浏览器修复' },
-      { kind: 'approval', sessionId: 'one', sessionTitle: '已改标题', key: 'approval:one:approval:2', summary: 'desktop_restart_harness：加载通知修复' },
-    ])
+    const interaction = { kind: 'question', key: 'q1', questions: [{ header: '尺寸', question: '选择哪种尺寸？' }] }
+    source.interactions.set(new Map([['one', interaction]]))
+    source.interactions.set(new Map([['one', interaction]]))
+    source.interactions.set(new Map([['one', { ...interaction, key: 'q2', kind: 'plan-review', questions: [{ question: '审核计划', intent: { kind: 'plan-review' } }] }]]))
+    expect(send.mock.calls.map(([v]) => v)).toMatchObject([{ kind: 'question', summary: '选择哪种尺寸？' }, { kind: 'plan-review', summary: '审核计划' }])
+    source.statuses.set(new Map([['one', { running: false }]]))
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(source.chat.listeners.size).toBe(1)
+    source.statuses.set(new Map([['one', { running: true }]]))
+    source.chat.set(chatSnapshot([{ seq: 2, blocks: [{ kind: 'text', text: '新轮次回复' }] }]))
+    source.statuses.set(new Map([['one', { running: false }]]))
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(send.mock.calls.map(([v]) => v)).toMatchObject([{ kind: 'question' }, { kind: 'plan-review' }, { kind: 'turn-complete', summary: '新轮次回复' }])
+    source.statuses.set(new Map([['one', { running: true }]]))
+    source.statuses.set(new Map([['one', { running: false }]]))
+    await new Promise(resolve => setTimeout(resolve, 10))
     source.dispose()
+    expect(source.chat.listeners.size).toBe(0)
+    expect(source.statuses.listeners.size).toBe(0)
     expect(source.list.listeners.size).toBe(0)
-    expect(source.interactions.listeners.size).toBe(0)
-  })
-
-  it('summarizes rc.1 question and plan-review objects without legacy payload wrappers', async () => {
-    const client = await loadClientModule()
-    const install = client.installSessionNotifications as (ctx: unknown, send: (value: unknown) => Promise<void>) => void
-    const source = notificationContext()
-    const send = vi.fn(async (_value: unknown) => {})
-    install(source.ctx, send)
-    source.interactions.set(new Map([['one', { key: 'question:1', kind: 'question', sessionId: 'one', questions: [{ header: '尺寸', question: '选择哪种尺寸？' }] }]]))
-    source.interactions.set(new Map([['one', { key: 'question:2', kind: 'plan-review', sessionId: 'one', questions: [{ question: '请审核实施计划', detail: '详细计划', intent: { kind: 'plan-review' } }] }]]))
-    expect(send.mock.calls.map(([value]) => value)).toMatchObject([
-      { kind: 'question', summary: '选择哪种尺寸？' },
-      { kind: 'plan-review', summary: '请审核实施计划' },
-    ])
-    source.dispose()
-  })
-
-  it('rechecks independently published interactions before sending a completion and still completes the selected session', async () => {
-    const client = await loadClientModule()
-    const install = client.installSessionNotifications as (ctx: unknown, send: (value: unknown) => Promise<void>) => void
-    const source = notificationContext()
-    const send = vi.fn(async (_value: unknown) => {})
-    install(source.ctx, send)
-    source.list.set({ byId: { one: { displayTitle: '测试对话', running: false, updatedAt: 2 } } })
-    source.interactions.set(new Map([['one', { key: 'approval:1', kind: 'approval', sessionId: 'one', toolName: 'Bash' }]]))
-    source.session.set({ nodes: [{ kind: 'assistant', seq: 1, blocks: [{ kind: 'text', text: '请求确认' }] }] })
-    await new Promise(resolve => setTimeout(resolve, 10))
-    expect(send).toHaveBeenCalledTimes(1)
-    expect(send.mock.calls[0]?.[0]).toMatchObject({ kind: 'approval' })
-    source.interactions.set(new Map())
-    source.list.set({ byId: { one: { displayTitle: '测试对话', running: true, updatedAt: 3 } } })
-    source.session.set({ nodes: [{ kind: 'assistant', seq: 2, blocks: [{ kind: 'text', text: '任务已完成' }] }] })
-    // The selected session has no `completed` unread-dot field in rc.1.
-    source.list.set({ byId: { one: { displayTitle: '测试对话', running: false, updatedAt: 4 } } })
-    await new Promise(resolve => setTimeout(resolve, 10))
-    expect(send.mock.calls.map(([value]) => value)).toMatchObject([
-      { kind: 'approval' }, { kind: 'turn-complete', summary: '任务已完成' },
-    ])
-    source.dispose()
-  })
-
-  it('keeps legacy approval notifications when the newer UI service is absent', async () => {
-    const client = await loadClientModule()
-    const install = client.installSessionNotifications as (ctx: unknown, send: (value: unknown) => Promise<void>) => void
-    const source = notificationContext(false)
-    const send = vi.fn(async (_value: unknown) => {})
-    install(source.ctx, send)
-    source.session.set({ pending: [{ kind: 'approval', payload: { toolName: 'Bash', reason: '运行测试' } }] })
-    source.list.set({ byId: { one: { displayTitle: '测试对话', running: false, pendingInteraction: 'approval', updatedAt: 2 } } })
     await Promise.resolve()
-    expect(send).toHaveBeenCalledWith({ kind: 'approval', sessionId: 'one', sessionTitle: '测试对话', key: 'approval:one:2', summary: 'Bash：运行测试' })
-    expect(source.interactions.listeners.size).toBe(0)
-    source.dispose()
+    expect(send).toHaveBeenCalledTimes(3)
   })
 
-  it('drops a delayed completion after a newer run and cancels summary subscriptions on disposal', async () => {
-    const client = await loadClientModule()
-    const install = client.installSessionNotifications as (ctx: unknown, send: (value: unknown) => Promise<void>) => void
-    const source = notificationContext()
-    const send = vi.fn(async (_value: unknown) => {})
-    install(source.ctx, send)
-    source.list.set({ byId: { one: { displayTitle: '测试对话', running: false, updatedAt: 2 } } })
-    await new Promise(resolve => setTimeout(resolve, 10))
-    expect(source.session.listeners.size).toBe(1)
-    source.list.set({ byId: { one: { displayTitle: '测试对话', running: true, updatedAt: 3 } } })
-    source.session.set({ nodes: [{ kind: 'assistant', seq: 2, blocks: [{ kind: 'text', text: '新轮次回复' }] }] })
-    source.list.set({ byId: { one: { displayTitle: '测试对话', running: false, updatedAt: 4 } } })
-    await new Promise(resolve => setTimeout(resolve, 10))
-    expect(send).toHaveBeenCalledTimes(1)
-    expect(send.mock.calls[0]?.[0]).toMatchObject({ kind: 'turn-complete', key: 'turn-complete:one:4', summary: '新轮次回复' })
-    source.list.set({ byId: { one: { displayTitle: '测试对话', running: true, updatedAt: 5 } } })
-    source.list.set({ byId: { one: { displayTitle: '测试对话', running: false, updatedAt: 6 } } })
-    await new Promise(resolve => setTimeout(resolve, 10))
-    expect(source.session.listeners.size).toBe(1)
-    source.dispose()
-    expect(source.session.listeners.size).toBe(0)
-    await Promise.resolve()
-    expect(send).toHaveBeenCalledTimes(1)
-  })
-
-  it('attaches a later UI service through real Cordis optional injection and disposes both subscriptions', async () => {
-    const projectRequire = createRequire(import.meta.url)
-    const dshRequire = createRequire(projectRequire.resolve('@deepseek-ai/dsh/package.json'))
-    type TestContext = {
-      fiber: { dispose(): Promise<void> }
-      plugin(plugin: unknown): Promise<{ dispose(): Promise<void> }>
-    }
-    const cordis = await import(pathToFileURL(dshRequire.resolve('@deepseek-ai/cordis')).href) as {
-      Context: new () => TestContext
-      Service: new (ctx: TestContext, name: string) => object
-    }
-    const client = await loadClientModule()
-    const install = client.installSessionNotifications as (ctx: unknown, send: (value: unknown) => Promise<void>) => void
-    const source = notificationContext()
-    const send = vi.fn(async (_value: unknown) => {})
-    const root = new cordis.Context()
-    class Sessions extends cordis.Service {
-      list = source.list
-      binding = source.ctx.sessions.binding
-      constructor(ctx: TestContext) { super(ctx, 'sessions') }
-    }
-    class UiSession extends cordis.Service {
-      pendingInteractions = source.interactions
-      constructor(ctx: TestContext) { super(ctx, 'uiSession') }
-    }
-    try {
-      await root.plugin(Sessions)
-      const consumer = await root.plugin(Object.assign((ctx: TestContext) => install(ctx, send), { inject: ['sessions'] }))
-      expect(source.list.listeners.size).toBe(1)
-      expect(source.interactions.listeners.size).toBe(0)
-      const ui = await root.plugin(UiSession)
-      expect(source.interactions.listeners.size).toBe(1)
-      source.interactions.set(new Map([['one', { key: 'approval:1', kind: 'approval', sessionId: 'one', toolName: 'Bash' }]]))
-      expect(send).toHaveBeenCalledWith(expect.objectContaining({ kind: 'approval', summary: '请求使用 Bash' }))
-      await ui.dispose()
-      expect(source.interactions.listeners.size).toBe(0)
-      expect(source.list.listeners.size).toBe(1)
-      await consumer.dispose()
-      expect(source.list.listeners.size).toBe(0)
-    } finally {
-      await root.fiber.dispose()
-    }
-  })
-
-  it.each(['allowed-once', 'rejected'] as const)('answers the real rc.1 PendingApproval once with %s', async (decision) => {
+  it.each(['allowed-once', 'rejected'] as const)('answers the real 0.1.7 PendingApproval once with %s', async (decision) => {
     const client = await loadClientModule()
     const install = client.installSessionNotifications as (ctx: unknown, send: (value: unknown) => Promise<void>) => void
     const source = notificationContext()
@@ -535,7 +311,7 @@ describe('desktop notification session transitions', () => {
     const command = { sessionId: 'one', ...notification.approval, decision }
     await expect(Promise.all([transport.answer(command), transport.answer(command)])).resolves.toEqual(['answered', 'expired'])
     await expect(outcome).resolves.toBe(decision)
-    expect(source.interactions.getSnapshot().size).toBe(0)
+    expect(source.statuses.getSnapshot().get('one')?.pendingInteraction).toBeUndefined()
     source.dispose()
     expect(approvalTransport(client)).toBeUndefined()
   })
@@ -551,7 +327,7 @@ describe('desktop notification session transitions', () => {
     const initial = (send.mock.calls[0]?.[0] as { approval: NotificationApproval }).approval
     const replacement = { ...first, answer: vi.fn(async () => {}) }
     // Deliberately omit a store notification: the native click must re-read the actual object.
-    source.interactions.getSnapshot().set('one', replacement)
+    source.statuses.getSnapshot().set('one', { running: true, pendingInteraction: replacement })
     await expect(approvalTransport(client)!.answer({ sessionId: 'one', ...initial, decision: 'allowed-once' })).resolves.toBe('expired')
     expect(first.answer).not.toHaveBeenCalled()
     expect(replacement.answer).not.toHaveBeenCalled()

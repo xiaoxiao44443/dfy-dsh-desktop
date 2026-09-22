@@ -1,3 +1,4 @@
+import './harness-node-internals.cjs'
 import childProcess from 'node:child_process'
 import type { ChildProcess, ForkOptions, SpawnOptions } from 'node:child_process'
 import { createRequire, registerHooks, syncBuiltinESMExports } from 'node:module'

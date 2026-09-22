@@ -1,9 +1,10 @@
-import { access, readdir, readFile, writeFile } from 'node:fs/promises'
+import { access, readdir, readFile, realpath, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import type { Dirent } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 import { dialog, type BrowserWindow } from 'electron'
 import { valid } from 'semver'
-import { DFY_PLUGINS, DFY_PLUGIN_CATALOG_URL, isDfyRegistrySource, parseDfyPluginCatalog } from '../shared/dfy-plugins.js'
+import { DFY_PLUGINS, DFY_PLUGIN_CATALOG_URL, includedDfyPlugins, isDfyRegistrySource, normalizeDfySelection, parseDfyPluginCatalog } from '../shared/dfy-plugins.js'
 import type {
   DfyPluginCatalog,
   DfyPluginDefinition,
@@ -19,6 +20,8 @@ import type {
   PluginUpdateRequest,
 } from '../shared/contracts.js'
 import type { HarnessCommandResult } from './harness-process.js'
+import { migrateLegacyPluginState } from './profile-upgrade.js'
+import type { PluginActivationOutcome } from '../shared/contracts.js'
 
 const PACKAGE_NAME_PATTERN = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/iu
 
@@ -28,22 +31,21 @@ interface ProfileManifest {
     profile?: {
       bundles?: string[]
     }
-    desktop?: {
-      bundleOrder?: string[]
-      disabledBundles?: string[]
-    }
   }
 }
 
 interface PackageMetadata {
+  name?: string
   version?: string
   description?: string
   bundle: boolean
+  includedPlugins?: ManagedPluginEntry['includedPlugins']
 }
 
 export interface PluginManagementActions {
   getWindow(): BrowserWindow | undefined
   runPnpm(profile: string, args: string[]): Promise<HarnessCommandResult>
+  setBundleEnabled?(request: PluginActivationRequest): Promise<PluginActivationOutcome | undefined>
   fetch?: typeof fetch
   catalogFile?: string
 }
@@ -149,12 +151,19 @@ export class PluginManagementService {
       || request.packageNames.length > allowed.size || request.packageNames.some((name) => !allowed.has(name))) {
       throw new Error('请选择列表中的 DFY 插件。')
     }
-    const names = [...new Set(request.packageNames)]
+    const names = normalizeDfySelection(request.packageNames, this.dfyPlugins)
     const args = request.action === 'install'
       ? ['add', ...names.map((name) => `${name}@latest`), '--registry=https://registry.npmjs.org']
       : ['update', ...names, '--latest', '--registry=https://registry.npmjs.org']
     return await this.run(profile, args, async (before) => {
+      const inventory = await this.readProfile(profile)
+      const included = includedDfyPlugins(inventory.plugins)
       for (const name of names) {
+        if (request.action === 'install') {
+          const owner = included.get(name)
+          if (owner !== undefined) throw new Error(`“${name}”已由“${owner.bundle.name}”提供，请管理或更新组合包。`)
+          this.assertBundleCanInstall(this.dfyPlugins.find(entry => entry.name === name)?.includes, before)
+        }
         const source = before.dependencies?.[name]
         if (source !== undefined && !isDfyRegistrySource(source)) {
           throw new Error(`“${name}”使用本地、Git 或其他来源，请在“已安装”中管理。`)
@@ -173,7 +182,22 @@ export class PluginManagementService {
     const source = request.source.trim()
     if (source.length === 0) throw new Error('请填写 npm 包名、Git 仓库地址或本地插件目录。')
     if (source.length > 2_000 || /[\r\n\0]/u.test(source)) throw new Error('插件来源无效。')
-    return await this.run(profile, ['add', source])
+    return await this.run(profile, ['add', source], async (before) => {
+      const profileDir = join(this.harnessHome, 'profiles', profile)
+      const path = resolveLocalSource(profileDir, source)
+      const metadata = path === undefined ? undefined : await readMetadataFile(join(path, 'package.json'))
+      const name = metadata?.name ?? source.match(/^(@[a-z0-9._-]+\/[a-z0-9._-]+|[a-z0-9._-]+)(?:@[^\s]+)?$/iu)?.[1]
+      if (name === undefined) return
+      const owner = includedDfyPlugins((await this.readProfile(profile)).plugins).get(name)
+      if (owner !== undefined) throw new Error(`“${name}”已由“${owner.bundle.name}”提供，请管理或更新组合包。`)
+      this.assertBundleCanInstall(metadata?.includedPlugins?.map(member => member.name)
+        ?? this.dfyPlugins.find(entry => entry.name === name)?.includes, before)
+    })
+  }
+
+  private assertBundleCanInstall(members: string[] | undefined, manifest: ProfileManifest): void {
+    const existing = members?.filter(name => manifest.dependencies?.[name] !== undefined) ?? []
+    if (existing.length > 0) throw new Error(`已单独安装 ${existing.length} 个组件（${existing.join('、')}）。请先迁移到组合包，保留配置和停用状态后移除这些单独安装项，避免重复加载。`)
   }
 
   async remove(request: PluginRemoveRequest): Promise<PluginMutationResult> {
@@ -213,6 +237,7 @@ export class PluginManagementService {
     this.commandRunning = true
     try {
       const profileDir = join(this.harnessHome, 'profiles', profile)
+      await migrateLegacyPluginState(profileDir)
       const manifestPath = join(profileDir, 'package.json')
       const manifest = await this.readManifest(manifestPath)
       const dependencySpec = manifest.dependencies?.[packageName]
@@ -220,27 +245,37 @@ export class PluginManagementService {
         throw new Error(`“${packageName}”不是 ${profile} Profile 中可管理的外部插件。`)
       }
 
-      const metadata = await this.readPackageMetadata(profileDir, packageName, dependencySpec)
-      if (metadata === undefined) throw new Error(`“${packageName}”的插件来源已失效，无法更改启用状态。`)
-      if (!metadata.bundle) throw new Error(`“${packageName}”没有声明 DSH bundle，无法作为插件启用。`)
-
       const bundles = validStringList(manifest.dsh?.profile?.bundles)
-      const disabledBundles = validStringList(manifest.dsh?.desktop?.disabledBundles)
-      const currentlyActive = bundles.includes(packageName) && !disabledBundles.includes(packageName)
+      const currentlyActive = bundles.includes(packageName)
+      if (request.active) {
+        const metadata = await this.readPackageMetadata(profileDir, packageName, dependencySpec)
+        if (metadata === undefined) throw new Error(`“${packageName}”的插件来源已失效，无法启用。`)
+        if (!metadata.bundle) throw new Error(`“${packageName}”没有声明 DSH bundle，无法作为插件启用。`)
+      }
+
+      // The running Profile uses the same manager, lock, reload and diagnostics
+      // as DSH's own Plugins page. Never silently fall back after a live error.
+      const outcome = await this.actions.setBundleEnabled?.(request)
+      if (outcome !== undefined) {
+        return {
+          inventory: await this.getInventory(),
+          command: `pluginManager.setBundleEnabled(${JSON.stringify(packageName)}, ${request.active})`,
+          output: activationMessage(packageName, request.active, outcome),
+          exitCode: outcome.application === 'failed' || outcome.application === 'cancelled' ? 1 : 0,
+          restartRequired: outcome.application === 'restart-required',
+        }
+      }
+
+      // An inactive Profile has no live manager. Its durable switch is still
+      // the official ordered selection: disabling retains the dependency and
+      // re-enabling appends the bundle, exactly as PluginManager does.
       if (currentlyActive !== request.active) {
-        const bundleOrder = resolveBundleOrder(manifest)
-        if (!bundleOrder.includes(packageName)) bundleOrder.push(packageName)
-        const nextDisabledBundles = request.active
-          ? disabledBundles.filter((name) => name !== packageName)
-          : [...disabledBundles.filter((name) => name !== packageName), packageName]
-        const enabledBundles = bundles.filter((name) => !nextDisabledBundles.includes(name))
         const nextBundles = request.active
-          ? bundleOrder.filter((name) => name === packageName || enabledBundles.includes(name))
-          : enabledBundles
+          ? [...bundles, packageName]
+          : bundles.filter(name => name !== packageName)
         manifest.dsh = {
           ...manifest.dsh,
           profile: { ...manifest.dsh?.profile, bundles: nextBundles },
-          desktop: { ...manifest.dsh?.desktop, bundleOrder, disabledBundles: nextDisabledBundles },
         }
         await this.writeManifest(manifestPath, manifest)
       }
@@ -250,8 +285,9 @@ export class PluginManagementService {
         command: `Profile ${formatDisplayArgument(profile)}: ${request.active ? 'enable' : 'disable'} ${formatDisplayArgument(packageName)}`,
         output: currentlyActive === request.active
           ? `“${packageName}”已经${request.active ? '启用' : '停用'}。`
-          : `已${request.active ? '启用' : '停用'}“${packageName}”并保存 Profile 配置；重启 Harness 后生效。`,
+          : `已${request.active ? '启用' : '停用'}“${packageName}”；下次启动此 Profile 时生效。`,
         exitCode: 0,
+        restartRequired: currentlyActive !== request.active,
       }
     } finally {
       this.commandRunning = false
@@ -261,17 +297,17 @@ export class PluginManagementService {
   private async readProfile(name: string): Promise<PluginProfileInventory> {
     const profileDir = join(this.harnessHome, 'profiles', name)
     try {
+      await migrateLegacyPluginState(profileDir)
       const manifest = await this.readManifest(join(profileDir, 'package.json'))
       const dependencies = manifest.dependencies ?? {}
       const bundles = manifest.dsh?.profile?.bundles?.filter((entry): entry is string => typeof entry === 'string') ?? []
-      const disabledBundles = new Set(validStringList(manifest.dsh?.desktop?.disabledBundles))
       const dependencyOnly = Object.keys(dependencies).filter((entry) => !bundles.includes(entry)).sort()
       const names = [...new Set([...bundles, ...dependencyOnly])]
       const plugins = await Promise.all(names.map((packageName) => this.readPlugin(
         profileDir,
         packageName,
         dependencies[packageName],
-        bundles.includes(packageName) && !disabledBundles.has(packageName),
+        bundles.includes(packageName),
       )))
       return { name, plugins }
     } catch (error) {
@@ -298,9 +334,10 @@ export class PluginManagementService {
       sourceType,
       source: dependencySpec ?? '随 Harness 提供',
       active,
-      toggleable: dependencySpec !== undefined && metadata?.bundle === true,
+      toggleable: dependencySpec !== undefined && (metadata?.bundle === true || active),
       removable: dependencySpec !== undefined,
       status: dependencySpec !== undefined && metadata === undefined ? 'missing' : 'ready',
+      ...(metadata?.includedPlugins === undefined ? {} : { includedPlugins: metadata.includedPlugins }),
     }
   }
 
@@ -330,26 +367,6 @@ export class PluginManagementService {
     await writeFile(path, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
   }
 
-  private async reconcileDesktopBundleState(profile: string): Promise<void> {
-    const path = join(this.harnessHome, 'profiles', profile, 'package.json')
-    const manifest = await this.readManifest(path)
-    if (manifest.dsh?.desktop === undefined) return
-    const bundleOrder = resolveBundleOrder(manifest)
-    const dependencies = new Set(Object.keys(manifest.dependencies ?? {}))
-    const disabledBundles = validStringList(manifest.dsh.desktop.disabledBundles)
-      .filter((name, index, values) => dependencies.has(name) && values.indexOf(name) === index)
-    const bundles = validStringList(manifest.dsh.profile?.bundles).filter((name) => !disabledBundles.includes(name))
-    if (sameStrings(bundleOrder, validStringList(manifest.dsh.desktop.bundleOrder))
-      && sameStrings(disabledBundles, validStringList(manifest.dsh.desktop.disabledBundles))
-      && sameStrings(bundles, validStringList(manifest.dsh.profile?.bundles))) return
-    manifest.dsh = {
-      ...manifest.dsh,
-      profile: { ...manifest.dsh.profile, bundles },
-      desktop: { ...manifest.dsh.desktop, bundleOrder, disabledBundles },
-    }
-    await this.writeManifest(path, manifest)
-  }
-
   private async reconcileInstalledBundles(profile: string, before: ProfileManifest): Promise<void> {
     const profileDir = join(this.harnessHome, 'profiles', profile)
     const path = join(profileDir, 'package.json')
@@ -357,7 +374,6 @@ export class PluginManagementService {
     const dependencies = manifest.dependencies ?? {}
     const dependencyNames = new Set(Object.keys(dependencies))
     const previousDependencies = new Set(Object.keys(before.dependencies ?? {}))
-    const disabledBundles = new Set(validStringList(manifest.dsh?.desktop?.disabledBundles))
     const bundleDependencies = new Set<string>()
     await Promise.all(Object.entries(dependencies).map(async ([packageName, dependencySpec]) => {
       const metadata = await this.readPackageMetadata(profileDir, packageName, dependencySpec)
@@ -366,13 +382,12 @@ export class PluginManagementService {
 
     const bundles = validStringList(manifest.dsh?.profile?.bundles)
     const nextBundles = bundles.filter((packageName) => {
-      if (disabledBundles.has(packageName)) return false
       if (dependencyNames.has(packageName)) return bundleDependencies.has(packageName)
       return !previousDependencies.has(packageName)
     })
     for (const packageName of Object.keys(dependencies)) {
       if (bundleDependencies.has(packageName)
-        && !disabledBundles.has(packageName)
+        && !previousDependencies.has(packageName)
         && !nextBundles.includes(packageName)) nextBundles.push(packageName)
     }
     if (sameStrings(nextBundles, bundles)) return
@@ -387,12 +402,12 @@ export class PluginManagementService {
     if (this.commandRunning) throw new Error('已有插件操作正在运行。')
     this.commandRunning = true
     try {
+      await migrateLegacyPluginState(join(this.harnessHome, 'profiles', profile))
       const before = await this.readManifest(join(this.harnessHome, 'profiles', profile, 'package.json'))
       await validate?.(before)
       const result = await this.actions.runPnpm(profile, args)
       if (result.exitCode === 0) {
         await this.reconcileInstalledBundles(profile, before)
-        await this.reconcileDesktopBundleState(profile)
       }
       return {
         inventory: await this.getInventory(),
@@ -426,34 +441,46 @@ function resolveLocalSource(profileDir: string, spec: string | undefined): strin
   return isAbsolute(candidate) ? candidate : resolve(profileDir, candidate)
 }
 
-async function readMetadataFile(path: string): Promise<PackageMetadata | undefined> {
+async function readMetadataFile(path: string, readMembers = true): Promise<PackageMetadata | undefined> {
   try {
     await access(path)
     const parsed = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>
     const dsh = isRecord(parsed.dsh) ? parsed.dsh : undefined
     const bundle = dsh !== undefined && isRecord(dsh.bundle) ? dsh.bundle : undefined
+    const isBundle = (typeof bundle?.patch === 'string' && bundle.patch.length > 0)
+      || (Array.isArray(bundle?.patch) && bundle.patch.length > 0 && bundle.patch.every(file => typeof file === 'string' && file.length > 0))
+    const dfy = isRecord(parsed.dfy) ? parsed.dfy : undefined
+    const dependencies = isRecord(parsed.dependencies) ? parsed.dependencies : {}
+    const names = readMembers && isBundle ? [...new Set(validStringList(dfy?.includes))].filter(name => name !== parsed.name
+      && /^@dfy-plugins\/[a-z0-9][a-z0-9._-]*$/u.test(name) && typeof dependencies[name] === 'string').slice(0, 100) : []
+    const require = names.length === 0 ? undefined : createRequire(await realpath(path))
+    const includedPlugins = await Promise.all(names.map(async name => {
+      let member: PackageMetadata | undefined
+      try { member = await readMetadataFile(require!.resolve(`${name}/package.json`), false) } catch {}
+      return { name, ...(member?.version === undefined ? {} : { version: member.version }), status: member?.bundle === true ? 'ready' as const : 'missing' as const }
+    }))
     return {
+      ...(typeof parsed.name === 'string' ? { name: parsed.name } : {}),
       ...(typeof parsed.version === 'string' ? { version: parsed.version } : {}),
       ...(typeof parsed.description === 'string' ? { description: parsed.description } : {}),
-      bundle: typeof bundle?.patch === 'string' && bundle.patch.length > 0,
+      bundle: isBundle,
+      ...(includedPlugins.length === 0 ? {} : { includedPlugins }),
     }
   } catch {
     return undefined
   }
 }
 
-function resolveBundleOrder(manifest: ProfileManifest): string[] {
-  const bundles = validStringList(manifest.dsh?.profile?.bundles)
-  const dependencies = Object.keys(manifest.dependencies ?? {})
-  const retained = new Set([...bundles, ...dependencies])
-  const order: string[] = []
-  for (const name of validStringList(manifest.dsh?.desktop?.bundleOrder)) {
-    if (retained.has(name) && !order.includes(name)) order.push(name)
+function activationMessage(name: string, enabled: boolean, result: PluginActivationOutcome): string {
+  const action = enabled ? '启用' : '停用'
+  const messages = {
+    applied: `已${action}“${name}”，已通过 DSH 官方插件管理器生效。`,
+    'restart-required': `已保存“${name}”的${action}状态；此 Profile 未启用热更新，需要重启。`,
+    overridden: `已保存“${name}”的${action}状态，但被更高优先级的配置覆盖。`,
+    failed: `DSH 未能${action}“${name}”：${result.error?.diagnostic ?? result.error?.code ?? '未知错误'}`,
+    cancelled: `“${name}”的${action}操作已取消。`,
   }
-  for (const name of bundles) {
-    if (!order.includes(name)) order.push(name)
-  }
-  return order
+  return [messages[result.application], ...(result.warnings ?? [])].join('\n')
 }
 
 function validStringList(value: unknown): string[] {

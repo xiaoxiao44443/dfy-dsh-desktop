@@ -15,6 +15,11 @@ import { applyHarnessRuntimeCompatibility } from './runtime-compat.js'
 import { prependToolchainToPath } from './harness-toolchain.js'
 import { assertSessionFormatCompatible } from './session-format-compat.js'
 
+export const MIN_HARNESS_VERSION = '0.1.7-alpha.1'
+
+export function supportsHarnessVersion(version: string): boolean {
+  return semver.valid(version) !== null && semver.gte(version, MIN_HARNESS_VERSION)
+}
 const require = createRequire(import.meta.url)
 const HARNESS_PACKAGE = '@deepseek-ai/dsh'
 const HARNESS_BOOTSTRAP = fileURLToPath(new URL('../harness-bootstrap.cjs', import.meta.url))
@@ -203,12 +208,12 @@ export class HarnessRuntimeManager extends EventEmitter {
     const bundled = this.mustBundled()
     const candidates: HarnessRuntimeCandidate[] = []
 
-    if (state.pendingVersion !== undefined && state.badVersions[state.pendingVersion] === undefined) {
+    if (state.pendingVersion !== undefined && supportsHarnessVersion(state.pendingVersion) && state.badVersions[state.pendingVersion] === undefined) {
       const pending = this.managedCandidate(state.pendingVersion, true)
       if (await this.isCandidatePresent(pending)) candidates.push(pending)
     }
 
-    if (state.activeVersion !== undefined && state.badVersions[state.activeVersion] === undefined) {
+    if (state.activeVersion !== undefined && supportsHarnessVersion(state.activeVersion) && state.badVersions[state.activeVersion] === undefined) {
       const active = this.managedCandidate(state.activeVersion, false)
       if (
         await this.isCandidatePresent(active)
@@ -299,6 +304,9 @@ export class HarnessRuntimeManager extends EventEmitter {
     const normalizedVersion = semver.valid(version)
     if (normalizedVersion === null || normalizedVersion !== version) {
       return Promise.reject(new Error('请选择有效的 Harness 版本。'))
+    }
+    if (!supportsHarnessVersion(version)) {
+      return Promise.reject(new Error(`此桌面版本要求 Harness ${MIN_HARNESS_VERSION} 或更高版本。`))
     }
     if (this.updatePromise !== undefined) {
       return Promise.reject(new Error('另一项 Harness 更新操作正在进行。'))
@@ -446,7 +454,7 @@ export class HarnessRuntimeManager extends EventEmitter {
     })
     if (!response.ok) throw new Error(`npm registry returned HTTP ${response.status}`)
     const metadata = await response.json() as RegistryMetadata
-    const latestVersion = metadata['dist-tags']?.latest
+    let latestVersion = metadata['dist-tags']?.latest
     if (latestVersion === undefined || semver.valid(latestVersion) === null) {
       throw new Error('npm registry did not return a valid latest version')
     }
@@ -458,8 +466,12 @@ export class HarnessRuntimeManager extends EventEmitter {
       tags.add(tag)
       distTagsByVersion.set(version, tags)
     }
-    const availableVersions = new Set(Object.keys(metadata.versions ?? {}).filter((version) => semver.valid(version) !== null))
-    for (const version of distTagsByVersion.keys()) availableVersions.add(version)
+    const availableVersions = new Set(Object.keys(metadata.versions ?? {}).filter(supportsHarnessVersion))
+    for (const version of distTagsByVersion.keys()) if (supportsHarnessVersion(version)) availableVersions.add(version)
+    if (!supportsHarnessVersion(latestVersion)) {
+      latestVersion = [...availableVersions].sort(semver.rcompare)[0]
+      if (latestVersion === undefined) throw new Error(`没有可用的 Harness ${MIN_HARNESS_VERSION} 或更高版本`)
+    }
     const versions = [...availableVersions]
       .sort((left, right) => {
         const leftTime = Date.parse(metadata.time?.[left] ?? '')
@@ -677,6 +689,9 @@ export class HarnessRuntimeManager extends EventEmitter {
     if (typeof manifest.version !== 'string' || semver.valid(manifest.version) === null) {
       throw new Error('The bundled DeepSeek Harness has no valid version')
     }
+    if (!supportsHarnessVersion(manifest.version)) {
+      throw new Error(`内置 Harness 版本过低，需要 ${MIN_HARNESS_VERSION} 或更高版本。`)
+    }
     return { version: manifest.version, entryPath, source: 'bundled', pending: false }
   }
 
@@ -702,7 +717,7 @@ export class HarnessRuntimeManager extends EventEmitter {
     for (const key of ['activeVersion', 'pendingVersion'] as const) {
       const version = state[key]
       if (version === undefined) continue
-      const usableManagedRuntime = semver.valid(version) !== null
+      const usableManagedRuntime = supportsHarnessVersion(version)
         && version !== bundled.version
         && state.badVersions[version] === undefined
         && await this.isCandidatePresent(this.managedCandidate(version, key === 'pendingVersion'))

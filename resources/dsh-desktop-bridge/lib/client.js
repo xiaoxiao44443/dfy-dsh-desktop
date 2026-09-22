@@ -272,23 +272,21 @@ window.__ModuleLoader__.load({
 			};
 		}
 
-		function projectSessions(snapshot, interactions) {
+		function projectSessions(snapshot, statuses) {
 			const projected = new Map();
-			const byId = snapshot !== null && typeof snapshot === "object" ? snapshot.byId : undefined;
-			for (const [id, value] of Object.entries(byId ?? {})) {
+			for (const [id, value] of Object.entries(snapshot?.byId ?? {})) {
 				if (value === null || typeof value !== "object") continue;
+				const status = statuses?.get(id);
+				const interaction = status?.pendingInteraction;
 				projected.set(id, {
 					id,
 					displayTitle: typeof value.displayTitle === "string" ? value.displayTitle : id,
-					running: value.running === true,
-					pendingInteraction: interactions === undefined ? value.pendingInteraction : undefined,
+					running: status?.running,
+					pendingInteraction: interaction?.kind,
+					interactionKey: interaction?.key,
+					interaction,
 					updatedAt: typeof value.updatedAt === "number" ? value.updatedAt : 0
 				});
-			}
-			for (const [id, interaction] of interactions ?? []) {
-				if (interaction === null || typeof interaction !== "object" || typeof interaction.kind !== "string") continue;
-				const current = projected.get(id) ?? { id, displayTitle: id, running: false, updatedAt: 0 };
-				projected.set(id, { ...current, pendingInteraction: interaction.kind, interactionKey: interaction.key, interaction });
 			}
 			return projected;
 		}
@@ -303,7 +301,7 @@ window.__ModuleLoader__.load({
 				if (interactionChanged && current.pendingInteraction === "approval") kind = "approval";
 				else if (interactionChanged && current.pendingInteraction === "question") kind = "question";
 				else if (interactionChanged && current.pendingInteraction === "plan-review") kind = "plan-review";
-				else if (prior?.running && !current.running && current.pendingInteraction === undefined) kind = "turn-complete";
+				else if (prior?.running && current.running === false && current.pendingInteraction === undefined) kind = "turn-complete";
 				if (kind !== undefined) notifications.push({
 					kind,
 					sessionId: id,
@@ -315,20 +313,19 @@ window.__ModuleLoader__.load({
 		}
 
 		function latestAssistantMessage(binding) {
-			let nodes;
-			try { nodes = binding?.session?.getSnapshot?.()?.nodes; } catch { return void 0; }
-			if (!Array.isArray(nodes)) return void 0;
-			for (let index = nodes.length - 1; index >= 0; index -= 1) {
-				const node = nodes[index];
-				if (node === null || typeof node !== "object" || node.kind !== "assistant" || !Array.isArray(node.blocks)) continue;
-				const text = node.blocks
+			let chat;
+			try { chat = binding?.chat?.getSnapshot(); } catch { return void 0; }
+			if (chat === undefined) return void 0;
+			for (let index = chat.order.length - 1; index >= 0; index -= 1) {
+				const node = chat.nodes.get(chat.order[index]);
+				if (node?.kind !== "assistant-step" || !Array.isArray(node.data?.blocks)) continue;
+				const text = node.data.blocks
 					.filter((block) => block !== null && typeof block === "object" && block.kind === "text" && typeof block.text === "string")
 					.map((block) => block.text.trim())
 					.filter(Boolean)
 					.join("\n\n")
 					.trim();
-				const marker = node.messageId ?? node.seq
-					?? `${String(node.turn ?? "")}:${String(node.step ?? "")}:${String(node.time ?? "")}`;
+				const marker = node.key;
 				return { marker, text: text.length > 0 ? text.slice(0, 4e3) : void 0 };
 			}
 			return void 0;
@@ -346,7 +343,7 @@ window.__ModuleLoader__.load({
 			if (signal?.aborted) return Promise.resolve(void 0);
 			const immediate = read();
 			if (immediate !== void 0) return Promise.resolve(immediate);
-			const session = binding?.session;
+			const session = binding?.chat;
 			if (session === void 0 || typeof session.subscribe !== "function") return Promise.resolve(void 0);
 			return new Promise((resolve) => {
 				let settled = false;
@@ -381,13 +378,7 @@ window.__ModuleLoader__.load({
 		}
 
 		function pendingInteractionSummary(binding, status, interaction) {
-			let detail = interaction;
-			if (detail === undefined) {
-				let pending;
-				try { pending = binding?.session?.getSnapshot?.()?.pending; } catch { return void 0; }
-				if (!Array.isArray(pending)) return void 0;
-				detail = [...pending].reverse().find((item) => item?.kind === (status === "approval" ? "approval" : "question"))?.payload;
-			}
+			const detail = interaction;
 			if (detail === null || typeof detail !== "object") return void 0;
 			if (status === "approval") {
 				const reason = typeof detail.reason === "string" ? detail.reason.trim() : "";
@@ -410,10 +401,6 @@ window.__ModuleLoader__.load({
 				&& !questionText.includes(header)) return `${header}：${questionText}`.slice(0, 4e3);
 			const summary = [questionText, header, questionDetail].find((value) => value.length > 0);
 			return summary?.slice(0, 4e3);
-		}
-
-		function waitForPendingInteractionSummary(binding, status, timeoutMs, signal) {
-			return waitForSessionValue(binding, () => pendingInteractionSummary(binding, status), timeoutMs, signal);
 		}
 
 		function createNotificationApprovals(readInteractions, isActive) {
@@ -467,16 +454,24 @@ window.__ModuleLoader__.load({
 		function installSessionNotifications(ctx, send = postNotification) {
 			let active = true;
 			const cancel = new AbortController();
-			let interactions;
-			const approvals = createNotificationApprovals(() => interactions?.getSnapshot(), () => active);
+			const statuses = ctx.uiSession.sessionStatus;
+			const readInteractions = () => new Map([...statuses.getSnapshot()].flatMap(([id, value]) => value.pendingInteraction === undefined ? [] : [[id, value.pendingInteraction]]));
+			const notificationBinding = (id) => {
+				const binding = ctx.sessions.binding(id);
+				if (binding === undefined) return undefined;
+				const conversation = ctx.uiConversation.binding(binding);
+				conversation.activate("chat");
+				return { chat: conversation.target("chat") };
+			};
+			const approvals = createNotificationApprovals(readInteractions, () => active);
 			const transportWindow = window;
 			const transportSymbol = Symbol.for(NOTIFICATION_APPROVAL_TRANSPORT_KEY);
-			const snapshot = () => projectSessions(ctx.sessions.list.getSnapshot(), interactions?.getSnapshot());
+			const snapshot = () => projectSessions(ctx.sessions.list.getSnapshot(), statuses.getSnapshot());
 			let previous = snapshot();
 			const runBaselines = new Map();
 			const runVersions = new Map();
 			for (const [id, session] of previous) {
-				if (session.running) runBaselines.set(id, latestAssistantMarker(ctx.sessions.binding(id)));
+				if (session.running) runBaselines.set(id, latestAssistantMarker(notificationBinding(id)));
 			}
 			const onSessionsChanged = () => {
 				if (!active) return;
@@ -484,14 +479,14 @@ window.__ModuleLoader__.load({
 				const next = snapshot();
 				for (const [id, session] of next) {
 					if (session.running && !previous.get(id)?.running) {
-						runBaselines.set(id, latestAssistantMarker(ctx.sessions.binding(id)));
+						runBaselines.set(id, latestAssistantMarker(notificationBinding(id)));
 						runVersions.set(id, (runVersions.get(id) ?? 0) + 1);
 					}
 				}
 				const notifications = diffSessionNotifications(previous, next);
 				previous = next;
 				for (const notification of notifications) {
-					const binding = ctx.sessions.binding(notification.sessionId);
+					const binding = notificationBinding(notification.sessionId);
 					const baseline = runBaselines.get(notification.sessionId);
 					const runVersion = runVersions.get(notification.sessionId);
 					const interaction = next.get(notification.sessionId)?.interaction;
@@ -502,9 +497,7 @@ window.__ModuleLoader__.load({
 						if (!active) return;
 						const summary = notification.kind === "turn-complete"
 							? await waitForAssistantReply(binding, baseline, undefined, cancel.signal)
-							: interaction !== undefined
-								? pendingInteractionSummary(binding, notification.kind, interaction)
-								: await waitForPendingInteractionSummary(binding, notification.kind, undefined, cancel.signal);
+							: pendingInteractionSummary(binding, notification.kind, interaction);
 						if (!active) return;
 						const current = snapshot().get(notification.sessionId);
 						if (notification.kind === "turn-complete" && (current === undefined || current.running || current.pendingInteraction !== undefined || runVersions.get(notification.sessionId) !== runVersion)) return;
@@ -520,32 +513,16 @@ window.__ModuleLoader__.load({
 			ctx.effect(() => {
 				Object.defineProperty(transportWindow, transportSymbol, { configurable: true, enumerable: false, value: approvals.transport });
 				const unsubscribe = ctx.sessions.list.subscribe(onSessionsChanged);
+				const unsubscribeStatus = statuses.subscribe(onSessionsChanged);
 				return () => {
 					active = false;
 					cancel.abort();
 					unsubscribe();
+					unsubscribeStatus();
 					approvals.clear();
 					if (transportWindow[transportSymbol] === approvals.transport) delete transportWindow[transportSymbol];
 				};
 			}, "desktop-notifications: session transitions");
-			// A child injection waits for the newer UI service without requiring it on old Harness versions.
-			ctx.inject(["uiSession"], (uiCtx) => {
-				const source = uiCtx.uiSession.pendingInteractions;
-				if (source === undefined) return;
-				uiCtx.effect(() => {
-					interactions = source;
-					const unsubscribe = source.subscribe(onSessionsChanged);
-					onSessionsChanged();
-					return () => {
-						unsubscribe();
-						if (interactions === source) {
-							interactions = undefined;
-							approvals.clear();
-							previous = snapshot();
-						}
-					};
-				}, "desktop-notifications: pending interactions");
-			});
 		}
 
 		async function postNotification(notification) {
@@ -682,7 +659,7 @@ window.__ModuleLoader__.load({
 				}
 			},
 				React.createElement("span", null, labels[value]),
-				React.createElement(Primitives.IconChevronDownOutline14, { size: 14 })
+				React.createElement(Primitives.IconChevronDownOutlineRegular, { size: 14 })
 			);
 			return React.createElement(Primitives.Menu, {
 				open,
@@ -750,8 +727,8 @@ window.__ModuleLoader__.load({
 			error: { margin: "12px 0 0", color: "#ef6b73", fontSize: 12 }
 		};
 
-		function installSessionOpenFeedback(sessions, report) {
-			const original = sessions.open;
+		function installSessionOpenFeedback(workspace, report) {
+			const original = workspace.openSession;
 			const wrapped = function (...args) {
 				try {
 					return original.apply(this, args);
@@ -762,13 +739,25 @@ window.__ModuleLoader__.load({
 						: `无法打开会话：${message}`);
 				}
 			};
-			sessions.open = wrapped;
-			return () => { if (sessions.open === wrapped) sessions.open = original; };
+			workspace.openSession = wrapped;
+			return () => { if (workspace.openSession === wrapped) workspace.openSession = original; };
 		}
 
 		exports.installSessionOpenFeedback = installSessionOpenFeedback;
+		function installPluginManagerTransport(remote) {
+			const key = Symbol.for("dsh.desktop.plugin-manager.transport.v1");
+			const transport = {
+				async setBundleEnabled(name, enabled) {
+					if (typeof name !== "string" || typeof enabled !== "boolean") throw new Error("Invalid bundle switch");
+					return await remote.pluginManager.setBundleEnabled(name, enabled);
+				}
+			};
+			Object.defineProperty(window, key, { value: transport, configurable: true });
+			return () => { if (window[key] === transport) delete window[key]; };
+		}
+		exports.installPluginManagerTransport = installPluginManagerTransport;
 		exports.name = "desktop-notifications";
-		exports.inject = ["slots", "sessions", "cordisInspect"];
+		exports.inject = ["slots", "sessions", "uiSession", "uiConversation", "uiWorkspace", "cordisInspect", "remote"];
 		exports.projectSessions = projectSessions;
 		exports.diffSessionNotifications = diffSessionNotifications;
 		exports.latestAssistantReply = latestAssistantReply;
@@ -780,7 +769,8 @@ window.__ModuleLoader__.load({
 		exports.DesktopContextMenuService = DesktopContextMenuService;
 		exports.createDesktopContextMenuInspectProvider = createDesktopContextMenuInspectProvider;
 		exports.apply = function apply(ctx) {
-			ctx.effect(() => installSessionOpenFeedback(ctx.sessions, (message) => window.alert(message)), "desktop: session open errors");
+			ctx.effect(() => installPluginManagerTransport(ctx.remote), "desktop: official plugin switches");
+			ctx.effect(() => installSessionOpenFeedback(ctx.uiWorkspace, (message) => window.alert(message)), "desktop: session open errors");
 			const desktopContextMenu = new DesktopContextMenuService(ctx);
 			ctx.effect(() => installContextMenuTransport(desktopContextMenu), "desktop-context-menu: Electron transport");
 			ctx.effect(
@@ -795,7 +785,7 @@ window.__ModuleLoader__.load({
 				if (event.source !== window || value === null || typeof value !== "object") return;
 				if (value.source !== "dfy-dsh-desktop" || value.type !== "notification-click") return;
 				if (typeof value.sessionId !== "string" || value.sessionId.length === 0) return;
-				try { ctx.sessions.open(value.sessionId); } catch {}
+				try { ctx.uiWorkspace.openSession(value.sessionId); } catch {}
 			};
 			window.addEventListener("message", onDesktopMessage);
 			ctx.effect(() => () => window.removeEventListener("message", onDesktopMessage), "desktop-notifications: notification click");

@@ -11,8 +11,8 @@ DeepSeek Harness 的轻量 Electron 桌面壳。Harness 仍是完整、未修改
 - 桌面壳 renderer 使用 React 19 + TypeScript + Vite，开发模式支持 HMR；Harness 页面和进程生命周期仍由 Electron 主进程独立托管。
 - 桌面端不覆盖 `DSH_HOME`：Harness 遵循官方解析顺序（显式配置、`$DSH_HOME`、`~/.dsh`）。因此外部 dsh 与桌面端自然共享配置、会话、Profile、凭据和扩展；项目工作区仍由 Harness 自己管理。
 - 桌面壳自己的 Chromium 状态、运行时、更新缓存和开发设置统一位于 `~/.saltfish/dfy-dsh-desktop`，Windows、macOS 与 Linux 使用同一目录约定。首次启动会自动迁移旧版 `~/.saltfish/deepseek-harness-desktop`。
-- Harness 核心安装在版本化目录。新版本先由 pnpm 安装到 staging，经桌面启动器运行 `dsh --version` 并核对输出后才标记待更新；兼容旧版自动执行入口与 `0.1.5-alpha.1` 的显式 `runCli()` 入口。下次启动先试运行新版本，失败会显示原因；回退和手动切换前检查已落盘的会话日志格式，阻止旧运行时读取升级后的会话。
-- 当前桌面端与内置 DSH 均为 `0.1.5-rc.2`。对 `0.1.5-alpha.1`、`0.1.5-alpha.2`、`0.1.5-rc.1` 和 `0.1.5-rc.2` 的旧日志迁移，启动器仅为已审计的 `dfy-media` 图片块和 `dfy-session-image` 生成图片块补充结构校验及准入，保留原内容和资源引用。事件转换、原日志保留和新版日志发布仍由 DSH 执行；未知块及未知字段继续拒绝迁移。侧栏点击不存在的会话时会显示错误提示。
+- Harness 核心安装在版本化目录。新版本先由 pnpm 安装到 staging，经桌面启动器运行 `dsh --version` 并核对输出后才标记待更新；使用当前 DSH 的显式 `runCli()` 入口。下次启动先试运行新版本，失败会显示原因；回退和手动切换前检查已落盘的会话日志格式，阻止旧运行时读取升级后的会话。
+- 当前桌面端与内置 DSH 均为 `0.1.7-alpha.1`，Electron 保持 `43.4.0`，模块解析使用已有的 `--expose-internals` 入口，可安装和启动的 DSH 最低版本也为 `0.1.7-alpha.1`。旧日志迁移仅为已审计的 `dfy-media`、`dfy-session-image` 块补充严格准入，由官方迁移至 V4 的 `plugin:` 内容块；保留原日志和图片引用。旧插件设置迁入配置树且不覆盖已有新配置。视觉理解插件停止加载，保留其包和原设置。
 - 桌面端为每个受管 Harness 运行时生成同源的 `dsh`、`pnpm` 和 `node` 启动器，并把它们注入 Harness 进程的 `PATH`。因此标题菜单里的开发操作、Harness 自己的终端和 Agent 启动的子进程使用的是同一套版本，不会出现“壳能用、dsh 自己不能用”的分叉。
 - 桌面端通过内置 Host + Client 插件 `dsh-desktop-bridge` 提供受审批的 `desktop_restart_harness` 工具、回复/权限/提问系统通知，并监测当前 Web Profile 是否在进程启动后发生变化。模型可以请求由 Electron 主进程安全重启 Harness，从而加载新安装的插件；桥接层使用桌面私有 `--patch` 和专用模块解析器注入。桌面端还会在当前 Web Profile 的 `node_modules` 中维护 `dsh-desktop-bridge`、`dsh-desktop-browser` 的目录链接，供官方插件清单检查读取包名和版本。启动与插件命令结束时会修复缺失、失效的链接；同名普通文件或目录会报错并保留。此过程不改写 Profile 的依赖声明或 bundle 配置。
 
@@ -80,11 +80,15 @@ Windows 提供系统托盘，macOS 提供菜单栏图标。菜单只有“打开
 
 “DFY 插件”页提供 DFY 插件的中文介绍、npm 最新版本和当前 Profile 的安装状态。支持搜索、单独安装、勾选后批量安装，以及一键更新已通过 npm 安装的 DFY 插件；公共依赖自动安装。本地目录、Git 和 workspace 来源保留原有来源，可从卡片上的“管理”返回已安装列表。版本查询失败时仍可浏览目录、重试查询或安装插件。
 
+支持 DFY 原生组合包：已安装页管理整包的启停、更新和移除，内部插件在 DSH 官方详情页分别启停。“DFY 插件”页读取已安装包的 `dfy.includes` 与实际依赖版本，将内部插件标为由组合包提供，管理按钮跳到所属组合包，不再重复安装或单独更新。批量选择组合包时自动去掉包含的单独插件。已有单独安装应先迁移，安装入口会阻止混装，保留原有来源和配置。
+
 DFY 插件名单从插件仓库主分支的 [catalog.json](https://github.com/xiaoxiao44443/dfy-dsh-plugins/blob/main/catalog.json) 读取，版本信息从 npm 读取。新增插件只需发布 npm 包并更新目录，无需发布桌面端。首次打开时查询，成功结果缓存 5 分钟，查询失败缓存 30 秒；缓存有效时切换页签、Profile 或重新打开管理窗口不会重复查询。DFY 页的顶部刷新按钮会同时重新读取本地安装状态、GitHub 目录和 npm 版本，错误提示中的“重试”也会跳过缓存；进行中的目录请求由各入口共享。GitHub 读取失败或目录格式无效时，保留本次运行中上次成功读取的列表；尚无缓存时使用内置备用列表。
 
 开发模式可用 `DFY_PLUGIN_CATALOG_FILE=/绝对路径/catalog.json pnpm dev` 预览尚未推送的目录文件；安装版始终读取 GitHub。目录只接受 `@dfy-plugins/` 下的包名，不从文件读取命令或安装地址。
 
-添加和移除操作始终通过官方 `dsh plugin --profile <名称> ...` 执行，由 dsh 在 pnpm 成功后维护 Profile 的 `dsh.profile.bundles`。桌面端不会直接改写 Profile。操作完成后可从管理页重启 Harness 使变更生效；遇到安装问题可直接打开官方插件文档。
+插件安装、更新和移除通过当前 Harness 环境中的 pnpm 执行，成功后同步 Profile 的 `dsh.profile.bundles`；更新不会重新启用已停用的插件。安装完成后可从管理页重启 Harness；遇到安装问题可直接打开官方插件文档。
+
+当前 Web Profile 的启停调用官方 `pluginManager.setBundleEnabled`，与 DSH 自带插件页共用状态、文件锁、热加载和错误反馈。启用包记录在 `dsh.profile.bundles`，停用只移出该列表，保留安装依赖；重新启用追加到列表末尾。插件内部条目的独立开关由官方页面维护 `cordis.patch.yml`。支持热加载时立即生效，只有官方返回需要重启时才提示重启；未运行的 Profile 保存同样的官方 bundle 选择，下次启动生效。旧桌面端的 `disabledBundles`、`bundleOrder` 会迁移清理，不再维护第二份开关状态。
 
 ## Harness 开发能力
 

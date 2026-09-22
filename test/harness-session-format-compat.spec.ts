@@ -15,7 +15,8 @@ beforeAll(async () => {
   const require = createRequire(import.meta.url)
   const compiler = join(dirname(require.resolve('typescript/package.json')), 'bin', 'tsc')
   await promisify(execFile)(process.execPath, [compiler, '--ignoreConfig', '--target', 'ES2024', '--module', 'NodeNext',
-    '--skipLibCheck', '--types', 'node', '--outDir', root, resolve('src/harness-session-format-compat.cts')])
+    '--skipLibCheck', '--types', 'node', '--outDir', root, resolve('src/harness-session-format-compat.cts'),
+    resolve('src/harness-node-internals.cts')])
   ;({ assertDfyHistoryBlock, withDfyHistoryAdmission } = require(join(root, 'harness-session-format-compat.cjs')))
 }, 20_000)
 afterAll(async () => { if (root !== undefined) await rm(root, { recursive: true, force: true }) })
@@ -27,7 +28,7 @@ const generated = { type: 'dfy-session-image', version: 1, ref: 'session-image-r
 } }
 
 describe('DFY historical content admission', () => {
-  it.each(['0.1.5-alpha.1', '0.1.5-alpha.2', '0.1.5-rc.1', '0.1.5-rc.2'])('installs the admission hook for audited runtime %s', async (version) => {
+  it.each(['0.1.7-alpha.1'])('installs the admission hook for audited runtime %s', async (version) => {
     const moduleRoot = join(root, version, 'node_modules', '@deepseek-ai', 'dsh-session-format-v2-to-v3')
     const entry = join(moduleRoot, 'lib', 'index.js')
     await mkdir(dirname(entry), { recursive: true })
@@ -53,6 +54,15 @@ export { assertContentBlock };
     `
     await expect(promisify(execFile)(process.execPath, ['-e', script])).resolves.toBeDefined()
   })
+
+  it('migrates DFY V2/V3 plain and compressed logs through the real V4 persistence and preserves originals', async () => {
+    const require = createRequire(import.meta.url)
+    const result = await promisify(execFile)(process.execPath, ['--expose-internals',
+      '--require', join(root, 'harness-node-internals.cjs'),
+      resolve('test/fixtures/history-migration-017.mjs'), require.resolve('@deepseek-ai/dsh/package.json'),
+      join(root, 'harness-session-format-compat.cjs')])
+    expect(result.stdout.match(/PASS /gu)).toHaveLength(4)
+  }, 30_000)
 
   it.each([media, generated])('preserves the released $type block without dropping references', (block) => {
     const before = structuredClone(block)
