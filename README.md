@@ -12,7 +12,7 @@ DeepSeek Harness 的轻量 Electron 桌面壳。Harness 仍是完整、未修改
 - 桌面端不覆盖 `DSH_HOME`：Harness 遵循官方解析顺序（显式配置、`$DSH_HOME`、`~/.dsh`）。因此外部 dsh 与桌面端自然共享配置、会话、Profile、凭据和扩展；项目工作区仍由 Harness 自己管理。
 - 桌面壳自己的 Chromium 状态、运行时、更新缓存和开发设置统一位于 `~/.saltfish/dfy-dsh-desktop`，Windows、macOS 与 Linux 使用同一目录约定。首次启动会自动迁移旧版 `~/.saltfish/deepseek-harness-desktop`。
 - Harness 核心安装在版本化目录。新版本先由 pnpm 安装到 staging，经桌面启动器运行 `dsh --version` 并核对输出后才标记待更新；使用当前 DSH 的显式 `runCli()` 入口。下次启动先试运行新版本，失败会显示原因；回退和手动切换前检查已落盘的会话日志格式，阻止旧运行时读取升级后的会话。
-- 当前桌面端与内置 DSH 均为 `0.1.7-alpha.1`，Electron 保持 `43.4.0`，模块解析使用已有的 `--expose-internals` 入口，可安装和启动的 DSH 最低版本也为 `0.1.7-alpha.1`。旧日志迁移仅为已审计的 `dfy-media`、`dfy-session-image` 块补充严格准入，由官方迁移至 V4 的 `plugin:` 内容块；保留原日志和图片引用。旧插件设置迁入配置树且不覆盖已有新配置。视觉理解插件停止加载，保留其包和原设置。
+- 当前桌面端与内置 DSH 均为 `0.1.7-alpha.2`，Electron 保持 `43.4.0`，模块解析使用已有的 `--expose-internals` 入口，可安装和启动的 DSH 最低版本为 `0.1.7-alpha.1`。旧日志迁移仅为已审计的 `dfy-media`、`dfy-session-image` 块补充严格准入，由官方迁移至 V4 的 `plugin:` 内容块；保留原日志和图片引用。旧插件设置迁入配置树且不覆盖已有新配置。视觉理解插件停止加载，保留其包和原设置。
 - 桌面端为每个受管 Harness 运行时生成同源的 `dsh`、`pnpm` 和 `node` 启动器，并把它们注入 Harness 进程的 `PATH`。因此标题菜单里的开发操作、Harness 自己的终端和 Agent 启动的子进程使用的是同一套版本，不会出现“壳能用、dsh 自己不能用”的分叉。
 - 桌面端通过内置 Host + Client 插件 `dsh-desktop-bridge` 提供受审批的 `desktop_restart_harness` 工具、回复/权限/提问系统通知，并监测当前 Web Profile 是否在进程启动后发生变化。模型可以请求由 Electron 主进程安全重启 Harness，从而加载新安装的插件；桥接层使用桌面私有 `--patch` 和专用模块解析器注入。桌面端还会在当前 Web Profile 的 `node_modules` 中维护 `dsh-desktop-bridge`、`dsh-desktop-browser` 的目录链接，供官方插件清单检查读取包名和版本。启动与插件命令结束时会修复缺失、失效的链接；同名普通文件或目录会报错并保留。此过程不改写 Profile 的依赖声明或 bundle 配置。
 
