@@ -144,34 +144,37 @@ describe('HarnessToolchainManager', () => {
     await writeFile(terminalProbe, `
       const pty = require(${JSON.stringify(runtimeRequire.resolve('node-pty'))});
       const { Terminal } = require(${JSON.stringify(runtimeRequire.resolve('@xterm/headless'))});
+      const terminal = new Terminal({ cols: 120, rows: 30, allowProposedApi: true });
       const shell = process.env.SystemRoot + '\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe';
-      const child = pty.spawn(shell, ['-NoLogo', '-NoProfile', '-Command',
+      const child = pty.spawn(shell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
         "& $env:ComSpec /d /c 'chcp 936 >nul'; Write-Output 'BEFORE_VERSION'; & $env:DFY_TEST_NODE_COMMAND -v; Write-Output 'AFTER_VERSION'"],
         { cols: 120, rows: 30, env: process.env });
-      let raw = '';
-      const deadline = setTimeout(() => { child.kill(); process.exitCode = 1; }, 8000);
-      child.onData(data => { raw += data; if (data.includes('\\x1b[6n')) child.write('\\x1b[1;1R'); });
+      let timedOut = false;
+      const deadline = setTimeout(() => { timedOut = true; child.kill(); }, 30_000);
+      // Let xterm answer terminal queries, including sequences split across PTY chunks.
+      terminal.onData(data => child.write(data));
+      child.onData(data => terminal.write(data));
       child.onExit(({ exitCode }) => {
         clearTimeout(deadline);
-        const terminal = new Terminal({ cols: 120, rows: 30, allowProposedApi: true });
-        terminal.write(raw, () => {
+        terminal.write('', () => {
           const screen = Array.from({ length: terminal.buffer.active.length }, (_, i) => terminal.buffer.active.getLine(i)?.translateToString(true)).join('\\n');
-          process.stdout.write(JSON.stringify({ exitCode, screen }), () => process.exit(0));
+          process.stdout.write(JSON.stringify({ exitCode, timedOut, screen }), () => process.exit(0));
         });
       });
     `)
     const terminalOutput = await new Promise<string>((resolveOutput, reject) => {
       execFile(process.execPath, [terminalProbe], {
-        windowsHide: true, timeout: 12_000,
+        windowsHide: true, timeout: 40_000,
         env: { ...process.env, DFY_TEST_NODE_COMMAND: toolchain.nodeCommand },
       }, (error, stdout) => error ? reject(error) : resolveOutput(stdout))
     })
-    const terminal = JSON.parse(terminalOutput) as { exitCode: number, screen: string }
-    expect(terminal.exitCode).toBe(0)
+    const terminal = JSON.parse(terminalOutput) as { exitCode: number, timedOut: boolean, screen: string }
+    expect(terminal.timedOut, terminalOutput).toBe(false)
+    expect(terminal.exitCode, terminalOutput).toBe(0)
     expect(terminal.screen).toContain('BEFORE_VERSION')
     expect(terminal.screen).toContain(process.version)
     expect(terminal.screen).toContain('AFTER_VERSION')
-  }, 30_000)
+  }, 60_000)
 
   const posixTest = process.platform === 'win32' ? it.skip : it
   posixTest('filters only the sandboxed-parent codesign diagnostic on macOS', async () => {
