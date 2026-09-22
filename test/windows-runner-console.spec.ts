@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { tmpdir } from 'node:os'
@@ -13,7 +13,8 @@ let platform: string
 let entry: string
 
 beforeAll(async () => {
-  root = await mkdtemp(join(tmpdir(), 'dsh-runner-console-'))
+  // Node resolves preloads through symlinks, including /var -> /private/var on macOS.
+  root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-runner-console-')))
   const compiler = join(dirname(createRequire(import.meta.url).resolve('typescript/package.json')), 'bin', 'tsc')
   await execute(process.execPath, [compiler, '--ignoreConfig', '--target', 'ES2024', '--module', 'NodeNext',
     '--skipLibCheck', '--types', 'node', '--outDir', root, resolve('src/windows-runner-console.cts')])

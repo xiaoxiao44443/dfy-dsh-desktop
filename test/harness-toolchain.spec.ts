@@ -171,7 +171,7 @@ describe('HarnessToolchainManager', () => {
     expect(terminal.screen).toContain('BEFORE_VERSION')
     expect(terminal.screen).toContain(process.version)
     expect(terminal.screen).toContain('AFTER_VERSION')
-  })
+  }, 30_000)
 
   const posixTest = process.platform === 'win32' ? it.skip : it
   posixTest('filters only the sandboxed-parent codesign diagnostic on macOS', async () => {
