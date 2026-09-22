@@ -612,7 +612,7 @@ window.__ModuleLoader__.load({
 					React.createElement(SettingRow, {
 						title: "启用权限通知",
 						description: "在需要通知和权限时显示提醒"
-					}, React.createElement(Toggle, {
+					}, React.createElement(Primitives.Switch, {
 						checked: settings.permissionRequests,
 						disabled,
 						label: "启用权限通知",
@@ -622,7 +622,7 @@ window.__ModuleLoader__.load({
 						title: "启用问题通知",
 						description: "需要输入才能继续时显示提醒",
 						last: true
-					}, React.createElement(Toggle, {
+					}, React.createElement(Primitives.Switch, {
 						checked: settings.questions,
 						disabled,
 						label: "启用问题通知",
@@ -690,27 +690,6 @@ window.__ModuleLoader__.load({
 			);
 		}
 
-		function Toggle({ checked, disabled, label, onChange }) {
-			return React.createElement("button", {
-				type: "button",
-				role: "switch",
-				"aria-checked": checked,
-				"aria-label": label,
-				disabled,
-				onClick: () => onChange(!checked),
-				style: {
-					...styles.toggle,
-					background: checked ? "var(--dsw-alias-state-business-primary)" : "var(--dsw-alias-bg-module-platform)",
-					opacity: disabled ? 0.6 : 1
-				}
-			}, React.createElement("span", {
-				style: {
-					...styles.knob,
-					transform: checked ? "translateX(12px)" : "translateX(0)"
-				}
-			}));
-		}
-
 		const styles = {
 			section: { width: "100%", color: "var(--dsw-alias-label-primary)" },
 			heading: { margin: "0 0 22px", fontSize: 18, fontWeight: 650 },
@@ -722,8 +701,6 @@ window.__ModuleLoader__.load({
 			description: { color: "var(--dsw-alias-label-tertiary)", fontSize: 12, fontWeight: 400, lineHeight: "18px" },
 			control: { flex: "0 0 auto" },
 			menuTrigger: { minWidth: 142, height: 36, padding: "0 14px", borderRadius: 18, border: 0, background: "var(--dsw-alias-bg-module-platform)", color: "var(--dsw-alias-label-primary)", font: "inherit", cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "space-between", gap: 12 },
-			toggle: { width: 32, height: 20, padding: 2, border: 0, borderRadius: 999, cursor: "pointer", transition: "background 120ms ease" },
-			knob: { display: "block", width: 16, height: 16, borderRadius: "50%", background: "white", boxShadow: "0 1px 2px rgba(0,0,0,.3)", transition: "transform 120ms ease" },
 			error: { margin: "12px 0 0", color: "#ef6b73", fontSize: 12 }
 		};
 

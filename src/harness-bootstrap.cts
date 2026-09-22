@@ -179,7 +179,12 @@ async function bootstrap(): Promise<void> {
   if (harnessEntry === undefined) throw new Error('Harness entry path was not provided')
 
   const harnessArgs = process.argv.slice(3)
-  ensureHiddenHarnessConsole(harnessEntry)
+  // Only the desktop's detached host needs its own hidden console. Terminal
+  // commands must retain their caller's console; AllocConsole is also denied
+  // inside the ACL sandbox and is unnecessary for commands such as --version.
+  const needsHiddenConsole = process.env.DSH_DESKTOP_HIDDEN_CONSOLE === '1'
+  delete process.env.DSH_DESKTOP_HIDDEN_CONSOLE
+  if (needsHiddenConsole) ensureHiddenHarnessConsole(harnessEntry)
   registerDesktopBridgeResolver()
   registerDfySessionFormatCompatibility()
   delete process.env.ELECTRON_RUN_AS_NODE

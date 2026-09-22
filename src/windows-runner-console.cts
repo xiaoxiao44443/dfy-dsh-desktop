@@ -35,6 +35,26 @@ function attachToHarnessConsole(runnerEntry: string): void {
   throw new Error(`AttachConsole failed (Win32 ${String(getLastError())})`)
 }
 
+function prepareNestedAclRunner(): void {
+  // DSH's ordinary Job runner starts the ACL runner through CreateProcessW,
+  // using the environment supplied over IPC. This bypasses child_process.spawn
+  // and its desktop adapter. Without Node mode the inner Electron process
+  // never executes the command, leaving the tool waiting indefinitely.
+  const [, , delimiter, executable, entry] = process.argv
+  const normalizedEntry = entry?.replaceAll('\\', '/').toLowerCase()
+  if (delimiter !== '--' || executable?.toLowerCase() !== process.execPath.toLowerCase()
+    || !normalizedEntry?.endsWith('/@deepseek-ai/dsh-sandbox-windows-acl/lib/runner.js')) return
+
+  process.argv.splice(4, 0, '--require', __filename)
+  process.prependListener('message', (message: unknown) => {
+    if (message === null || typeof message !== 'object' || !('type' in message) || message.type !== 'start'
+      || !('env' in message) || message.env === null || typeof message.env !== 'object') return
+    const environment = message.env as NodeJS.ProcessEnv
+    environment.ELECTRON_RUN_AS_NODE = '1'
+    delete environment.ELECTRON_NO_ATTACH_CONSOLE
+  })
+}
+
 // Loaded with --require so DSH retains its original entry point, arguments,
 // import.meta.main and IPC channel. Both ordinary and ACL runners need a real
 // console to prevent their native children from allocating a visible one.
@@ -44,4 +64,9 @@ if (process.platform === 'win32') {
     throw new Error('Windows runner entry path must be absolute')
   }
   attachToHarnessConsole(runnerEntry)
+  prepareNestedAclRunner()
+  // The flags apply only while these helpers boot. Their actual commands and
+  // any applications launched by those commands must get their normal mode.
+  delete process.env.ELECTRON_RUN_AS_NODE
+  delete process.env.ELECTRON_NO_ATTACH_CONSOLE
 }

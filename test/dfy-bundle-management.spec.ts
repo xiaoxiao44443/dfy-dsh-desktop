@@ -82,3 +82,22 @@ it('shows bundled components with their installed version and no separate instal
   expect(html).not.toContain('选择壁纸')
   expect(html).not.toContain('>安装</button>')
 })
+
+it('rejects enabling an incomplete bundle without preventing it from being disabled', async () => {
+  const { service, profile } = await fixture()
+  await service.setActive({ profile: 'web', packageName: bundle, active: false })
+  await expect(service.setActive({ profile: 'web', packageName: bundle, active: true })).rejects.toThrow(`缺少组件（${appearance}）`)
+  expect(JSON.parse(await readFile(join(profile, 'package.json'), 'utf8')).dsh.profile.bundles).not.toContain(bundle)
+})
+
+it('counts installed component coverage and excludes missing members from the total', async () => {
+  const { service } = await fixture()
+  const plugins = (await service.getInventory()).profiles[0]!.plugins
+  const catalog = { plugins: DFY_PLUGINS.filter(entry => [bundle, wallpaper, appearance].includes(entry.name)), releases: [] }
+  const html = renderToStaticMarkup(createElement(DfyPluginCatalog, { plugins, catalog, query: '', disabled: false, loading: false,
+    onReload: () => {}, onOpenRepository: () => {}, onMutate: async () => true, onManage: () => {} }))
+  expect(html).toContain('已安装 1 / 2 个插件')
+  expect(html).toContain('1 个组合包')
+  expect(html).toContain('组件缺失，请修复组合包')
+  expect(html).toContain('缺少 1 个组件')
+})

@@ -251,6 +251,8 @@ export class PluginManagementService {
         const metadata = await this.readPackageMetadata(profileDir, packageName, dependencySpec)
         if (metadata === undefined) throw new Error(`“${packageName}”的插件来源已失效，无法启用。`)
         if (!metadata.bundle) throw new Error(`“${packageName}”没有声明 DSH bundle，无法作为插件启用。`)
+        const missing = metadata.includedPlugins?.filter(member => member.status === 'missing') ?? []
+        if (missing.length > 0) throw new Error(`“${packageName}”缺少组件（${missing.map(member => member.name).join('、')}），请先修复组合包依赖后再启用。`)
       }
 
       // The running Profile uses the same manager, lock, reload and diagnostics

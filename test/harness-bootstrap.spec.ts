@@ -17,7 +17,10 @@ beforeAll(async () => {
   bootstrap = join(root, 'harness-bootstrap.cjs')
   await mkdir(join(root, 'node_modules/koffi'), { recursive: true })
   await writeFile(join(root, 'node_modules/koffi/index.js'), `
-    exports.load = () => ({ func: () => () => 1 });
+    exports.load = () => ({ func: declaration => () => {
+      (globalThis.hiddenConsoleCalls ??= []).push(declaration);
+      return 1;
+    } });
   `)
 }, 20_000)
 afterAll(async () => { if (root !== undefined) await rm(root, { recursive: true, force: true }) })
@@ -37,6 +40,18 @@ describe('Harness CLI entry compatibility', () => {
     const entry = join(root, 'failure.mjs')
     await writeFile(entry, 'export async function runCli() { throw new Error("CLI startup failed") }')
     await expect(execute(process.execPath, [bootstrap, entry])).rejects.toMatchObject({ code: 1 })
+  })
+
+  it.each([false, true])('allocates a console only for an explicit detached desktop launch (%s)', async (detached) => {
+    const platform = join(root, `console-platform-${detached}.cjs`)
+    const entry = join(root, `console-${detached}.mjs`)
+    await writeFile(platform, "Object.defineProperty(process, 'platform', { value: 'win32' });")
+    await writeFile(entry, 'console.log(JSON.stringify({ calls: globalThis.hiddenConsoleCalls ?? [], flag: process.env.DSH_DESKTOP_HIDDEN_CONSOLE ?? null }))')
+    const { stdout, stderr } = await execute(process.execPath, ['--require', platform, bootstrap, entry, '--version'], {
+      env: { ...process.env, DSH_DESKTOP_HIDDEN_CONSOLE: detached ? '1' : '' },
+    })
+    expect(stderr).toBe('')
+    expect(JSON.parse(stdout)).toEqual({ calls: detached ? ['void * __stdcall GetConsoleWindow()'] : [], flag: null })
   })
 })
 

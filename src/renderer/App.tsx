@@ -9,6 +9,8 @@ import { BrowserAddressInput } from './BrowserAddressInput.js'
 import { AgentPointerIcon } from './AgentPointerIcon.js'
 import { ContextMenu } from './ContextMenu.js'
 import { DfyPluginCatalog } from './DfyPluginCatalog.js'
+import { PluginFailurePanel } from './PluginFailurePanel.js'
+import { useBrowserPanelTransition } from './useBrowserPanelTransition.js'
 import { DFY_PLUGINS } from '../shared/dfy-plugins.js'
 import appIconUrl from '../../app-icon.png'
 import titlebarIconUrl from '../../titlebar-icon.png'
@@ -475,7 +477,7 @@ function DevelopmentPanel({
             <div className="recovered-plugin-list">
               {disabledPlugins.map((plugin) => (
                 <div className="recovered-plugin-row" key={plugin.entryId}>
-                  <div><strong>{plugin.pluginName}</strong><code>{plugin.entryId}</code></div>
+                  <div><strong>{plugin.displayName ?? plugin.pluginName}</strong><code>{plugin.pluginName}</code>{plugin.bundleName ? <small>所属组合包：{plugin.bundleTitle ?? plugin.bundleName}</small> : null}<code>条目：{plugin.entryId}</code></div>
                   <button className="compact-button" type="button" disabled={state.restarting} onClick={() => void runAction(() => desktopApi.restoreRecoveredPlugin(plugin.entryId), true)}>重新启用并重启</button>
                 </div>
               ))}
@@ -632,7 +634,7 @@ export function PluginManager({
   const matchingPlugins = managedPlugins.filter((plugin) => normalizedQuery.length === 0
     || `${plugin.name}\n${plugin.description ?? ''}\n${plugin.source}`.toLocaleLowerCase().includes(normalizedQuery))
   const localCount = managedPlugins.filter((plugin) => plugin.sourceType === 'local').length
-  const missingCount = managedPlugins.filter((plugin) => plugin.status === 'missing').length
+  const missingCount = managedPlugins.filter((plugin) => plugin.status === 'missing' || plugin.includedPlugins?.some(member => member.status === 'missing')).length
 
   const runMutation = useCallback(async (action: () => Promise<PluginMutationResult>, showResult = true) => {
     setOperating(true)
@@ -767,13 +769,16 @@ export function PluginManager({
 
   const renderPlugin = (plugin: ManagedPluginEntry): ReactNode => {
     const confirming = removeConfirmation === plugin.name
-    const stateLabel = updatingPlugin === plugin.name ? '更新中…' : plugin.status === 'missing' ? '来源失效' : !plugin.toggleable ? '非插件依赖' : plugin.active ? '已启用' : '已停用'
+    const missingMembers = plugin.includedPlugins?.filter(member => member.status === 'missing') ?? []
+    const incomplete = plugin.status === 'missing' || missingMembers.length > 0
+    const stateLabel = updatingPlugin === plugin.name ? '更新中…' : plugin.status === 'missing' ? '来源失效' : missingMembers.length > 0 ? `缺少 ${missingMembers.length} 个组件` : !plugin.toggleable ? '非插件依赖' : plugin.active ? '已启用' : '已停用'
     return (
-      <div className={`plugin-row${plugin.status === 'missing' ? ' missing' : ''}`} key={plugin.name} onContextMenu={(event) => openPluginContextMenu(event, plugin)}>
+      <div className={`plugin-row${incomplete ? ' missing' : ''}`} key={plugin.name} onContextMenu={(event) => openPluginContextMenu(event, plugin)}>
         <div className="plugin-row-main">
           <div className="plugin-name-line"><strong>{plugin.name}</strong>{plugin.version ? <span>{plugin.version}</span> : null}</div>
           <p>{plugin.description ?? (plugin.sourceType === 'builtin' ? '由当前 Harness 运行时提供' : '暂无插件说明')}</p>
           {plugin.includedPlugins ? <p>组合包 · 包含 {plugin.includedPlugins.length} 个插件，可在 DSH「插件」详情页分别启停。</p> : null}
+          {missingMembers.length > 0 ? <p className="plugin-error">缺少：{missingMembers.map(member => member.name).join('、')}。{plugin.sourceType === 'local' ? '请在源码仓库重新安装依赖并构建。' : '请使用原来源重新添加组合包以恢复依赖。'}</p> : null}
           <div className="plugin-source" title={plugin.source}><span className={`plugin-source-badge ${plugin.sourceType}`}>{PLUGIN_SOURCE_LABELS[plugin.sourceType]}</span><code>{plugin.source}</code></div>
         </div>
         <div className="plugin-row-actions">
@@ -790,7 +795,7 @@ export function PluginManager({
             >
               <span className="plugin-toggle-track" aria-hidden="true"><span /></span>
             </button>
-            <span className={`plugin-state ${plugin.status === 'missing' ? 'error' : plugin.active ? 'active' : ''}`}>{stateLabel}</span>
+            <span className={`plugin-state ${incomplete ? 'error' : plugin.active ? 'active' : ''}`}>{stateLabel}</span>
           </div>
           {plugin.removable ? confirming ? (
             <div className="plugin-remove-confirmation">
@@ -977,16 +982,6 @@ export function App(): ReactNode {
   }, [state])
 
   useEffect(() => {
-    if (state?.browser.panelOpen === false) {
-      setBrowserHistoryOpen(false)
-      setBrowserDisplayMenuOpen(false)
-      setBrowserSettingsMenuOpen(false)
-      setBrowserWidth(browserNormalWidth.current)
-      setBrowserExpanded(false)
-    }
-  }, [state?.browser.panelOpen])
-
-  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return
       if (pluginManagerOpen) setPluginManagerOpen(false)
@@ -1009,7 +1004,7 @@ export function App(): ReactNode {
   useEffect(() => {
     setStartupActionPending(false)
     setStartupActionError(undefined)
-  }, [state?.harnessLoadId, state?.pluginFailure?.entryId])
+  }, [state?.harnessLoadId, state?.pluginFailures?.map((failure) => failure.entryId).join('\0')])
 
   const focusHarness = useCallback(() => {
     if (state?.harnessUrl) harnessFrame.current?.focus({ preventScroll: true })
@@ -1022,14 +1017,35 @@ export function App(): ReactNode {
   const harnessUrl = state?.harnessUrl ?? ''
   const availableUpdate = state?.updateVersion !== undefined && state.updateVersion !== state.harnessVersion
   const patchEnabled = Boolean(state?.development.patchPath)
-  const pluginFailure = state?.pluginFailure
+  const pluginFailures = state?.pluginFailures ?? []
   const browserOpen = state?.browser.panelOpen === true && state.browser.settings.enabled
   const browserDisplayMode: BrowserDisplayMode = state?.browser.settings.displayMode ?? 'split'
   const browserModalOpen = releaseNotesOpen || updateOpen || desktopUpdateOpen || developmentOpen || pluginManagerOpen
   const browserPanelOpen = browserOpen && browserDisplayMode !== 'floating'
+  const lastVisibleBrowser = useRef(state?.browser)
+  useLayoutEffect(() => {
+    if (browserPanelOpen) lastVisibleBrowser.current = state?.browser
+  }, [browserPanelOpen, state?.browser])
+  // Closing the last tab also clears its URL in the main process. Retain the
+  // chrome and cached page image until the panel has finished sliding out.
+  const panelBrowser = browserPanelOpen ? state?.browser : lastVisibleBrowser.current
+  const reportBrowserViewBounds = useCallback(() => {
+    const host = browserViewHost.current
+    if (!browserPanelOpen || browserHistoryOpen || browserModalOpen || !state?.browser.url || host === null) return
+    const rect = host.getBoundingClientRect()
+    void desktopApi.setBrowserViewBounds(rect.width < 1 || rect.height < 1 ? null : {
+      x: rect.x, y: rect.y, width: rect.width, height: rect.height,
+    })
+  }, [browserHistoryOpen, browserModalOpen, browserPanelOpen, state?.browser.url])
+  const browserPresence = useBrowserPanelTransition(
+    browserPanelOpen,
+    browserDisplayMode === 'drawer' || browserExpanded,
+    browserDisplayMode !== 'floating' && !browserModalOpen && state?.browser.settings.enabled === true,
+    reportBrowserViewBounds,
+  )
   const browserMenuOpen = browserDisplayMenuOpen || browserSettingsMenuOpen
   const browserDisplayModeLabel = browserDisplayMode === 'split' ? '分栏' : browserDisplayMode === 'drawer' ? '抽屉' : '独立窗口'
-  const browserViewport = state?.browser.viewport
+  const browserViewport = panelBrowser?.viewport
   const renderedBrowserViewport = browserDevicePreview ?? browserViewport
   const browserDeviceMaxWidth = Math.max(240, Math.floor(browserSurfaceSize.width - BROWSER_DEVICE_TOTAL_GUTTER))
   const browserDeviceMaxHeight = Math.max(240, Math.floor(browserSurfaceSize.height - BROWSER_DEVICE_TOTAL_GUTTER))
@@ -1043,6 +1059,18 @@ export function App(): ReactNode {
   const browserDeviceRenderedHeight = renderedBrowserViewport === undefined
     ? 0
     : Math.max(1, Math.min(browserDeviceMaxHeight, Math.round(renderedBrowserViewport.height * browserDeviceScale)))
+
+  useEffect(() => {
+    if (!browserPanelOpen) {
+      setBrowserDisplayMenuOpen(false)
+      setBrowserSettingsMenuOpen(false)
+    }
+    if (!browserPresence.mounted) {
+      setBrowserHistoryOpen(false)
+      setBrowserWidth(browserNormalWidth.current)
+      setBrowserExpanded(false)
+    }
+  }, [browserPanelOpen, browserPresence.mounted])
 
   useEffect(() => {
     if (!browserModalOpen || !browserOpen) return
@@ -1067,7 +1095,7 @@ export function App(): ReactNode {
     observer.observe(surface)
     report()
     return () => observer.disconnect()
-  }, [browserPanelOpen, state?.browser.viewport])
+  }, [browserPresence.mounted, panelBrowser?.viewport])
 
   useEffect(() => {
     const host = browserViewHost.current
@@ -1079,19 +1107,7 @@ export function App(): ReactNode {
     let frame = 0
     const report = (): void => {
       cancelAnimationFrame(frame)
-      frame = requestAnimationFrame(() => {
-        const rect = host.getBoundingClientRect()
-        if (rect.width < 1 || rect.height < 1) {
-          void desktopApi.setBrowserViewBounds(null)
-          return
-        }
-        void desktopApi.setBrowserViewBounds({
-          x: rect.x,
-          y: rect.y,
-          width: rect.width,
-          height: rect.height,
-        })
-      })
+      frame = requestAnimationFrame(reportBrowserViewBounds)
     }
     const observer = new ResizeObserver(report)
     observer.observe(host)
@@ -1103,7 +1119,7 @@ export function App(): ReactNode {
       observer.disconnect()
       window.removeEventListener('resize', report)
     }
-  }, [browserHistoryOpen, browserModalOpen, browserPanelOpen, state?.browser.url, state?.browser.viewport?.height, state?.browser.viewport?.width])
+  }, [browserHistoryOpen, browserModalOpen, browserPanelOpen, reportBrowserViewBounds, state?.browser.url, state?.browser.viewport?.height, state?.browser.viewport?.width])
 
   const clearBrowserShellSnapshot = useCallback(() => {
     browserShellSnapshotGeneration.current += 1
@@ -1141,10 +1157,12 @@ export function App(): ReactNode {
   }, [])
 
   useEffect(() => {
-    if (!browserPanelOpen || browserHistoryOpen || browserModalOpen || !state?.browser.url) {
+    if (!browserPresence.mounted || browserHistoryOpen || browserModalOpen || !panelBrowser?.url) {
       clearBrowserShellSnapshot()
       return
     }
+    if (!browserPanelOpen || browserPresence.phase !== undefined) return
+    clearBrowserShellSnapshot()
     const generation = ++browserShellSnapshotGeneration.current
     let disposed = false
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -1156,10 +1174,10 @@ export function App(): ReactNode {
     void refresh()
     return () => {
       disposed = true
-      if (browserShellSnapshotGeneration.current === generation) clearBrowserShellSnapshot()
+      if (browserShellSnapshotGeneration.current === generation) browserShellSnapshotGeneration.current += 1
       if (timer !== undefined) clearTimeout(timer)
     }
-  }, [browserHistoryOpen, browserModalOpen, browserPanelOpen, clearBrowserShellSnapshot, prepareBrowserShellSnapshot, state?.browser.url, state?.browser.viewport?.height, state?.browser.viewport?.width])
+  }, [browserHistoryOpen, browserModalOpen, browserPanelOpen, browserPresence.mounted, browserPresence.phase, clearBrowserShellSnapshot, prepareBrowserShellSnapshot, panelBrowser?.url, panelBrowser?.viewport?.height, panelBrowser?.viewport?.width])
 
   useEffect(() => {
     if (!browserShellOverlayActive) return
@@ -1447,6 +1465,10 @@ export function App(): ReactNode {
       <main ref={contentRef} className="content">
         <section className="harness-pane">
           {harnessUrl ? <iframe key={state?.harnessLoadId} ref={harnessFrame} id="harness-frame" name="harness-frame" className="harness-frame" title="DeepSeek Harness" allow="clipboard-read; clipboard-write" src={harnessUrl} onLoad={() => void desktopApi.reportHarnessFrameLoaded(harnessUrl)} /> : null}
+          {ready && pluginFailures.length > 0 ? <details className="plugin-load-warning">
+            <summary>有 {pluginFailures.length} 个插件未能加载，Harness 仍可使用 · 查看详情</summary>
+            <PluginFailurePanel failures={pluginFailures} pending={startupActionPending} error={startupActionError} onRecover={(ids) => void runStartupAction(() => desktopApi.recoverFailedPlugins(ids))} />
+          </details> : null}
         {!ready ? (
           <section className={`startup ${state?.harnessLifecycle === 'error' ? 'error' : ''}`}>
             {runtimePreparationProgress !== undefined ? (
@@ -1462,31 +1484,23 @@ export function App(): ReactNode {
                 <span className="startup-progress-unit">%</span>
               </div>
             ) : <div className="loader" aria-hidden="true" />}
-            <h1 id="startup-title">{pluginFailure ? 'Harness 插件初始化失败' : state?.harnessLifecycle === 'error' ? 'DeepSeek Harness 启动失败' : preparingRuntime ? '正在准备 DeepSeek Harness' : '正在启动 DeepSeek Harness'}</h1>
+            <h1 id="startup-title">{pluginFailures.length > 0 ? 'Harness 插件加载失败' : state?.harnessLifecycle === 'error' ? 'DeepSeek Harness 启动失败' : preparingRuntime ? '正在准备 DeepSeek Harness' : '正在启动 DeepSeek Harness'}</h1>
             <p id="startup-message">{state?.harnessMessage ?? '正在准备本地 Harness 服务…'}</p>
-            {pluginFailure ? (
-              <div className="plugin-recovery-actions">
-                <p>可以先临时禁用 <strong>{pluginFailure.pluginName}</strong>，让 Harness 恢复启动。修好插件后可在“开发工具 → 插件恢复”中重新启用。</p>
-                {pluginFailure.recoverable ? (
-                  <button className="secondary-button recovery-button" type="button" disabled={startupActionPending} onClick={() => void runStartupAction(() => desktopApi.recoverFailedPlugin())}>
-                    {startupActionPending ? '正在禁用并重启…' : '临时禁用该插件并重启'}
-                  </button>
-                ) : <p className="startup-action-error">这个内置桥接插件不能自动禁用，请重新安装桌面应用。</p>}
-                {startupActionError ? <p className="startup-action-error" role="alert">{startupActionError}</p> : null}
-              </div>
+            {pluginFailures.length > 0 ? (
+              <PluginFailurePanel failures={pluginFailures} pending={startupActionPending} error={startupActionError} onRecover={(ids) => void runStartupAction(() => desktopApi.recoverFailedPlugins(ids))} />
             ) : state?.harnessLifecycle === 'error' ? <button className="secondary-button" type="button" onClick={() => void desktopApi.checkForHarnessUpdate()}>重新检查更新</button> : null}
           </section>
         ) : null}
         </section>
-        {browserPanelOpen ? (
-          <aside className={`browser-pane mode-${browserDisplayMode}${browserExpanded ? ' expanded' : ''}`} style={browserExpanded ? undefined : { width: browserWidth }} aria-label="内置浏览器">
+        {browserPresence.mounted ? (
+          <aside ref={browserPresence.paneRef} data-transition={browserPresence.phase} inert={!browserPanelOpen} className={`browser-pane mode-${browserDisplayMode}${browserExpanded ? ' expanded' : ''}`} style={browserExpanded ? undefined : { width: browserWidth }} aria-label="内置浏览器">
             {browserExpanded ? null : <div className="browser-resizer" role="separator" aria-orientation="vertical" onPointerDown={startBrowserResize} />}
             <header className="browser-chrome">
               <div className="browser-tabbar">
                 <div className="browser-tabs" role="tablist" aria-label="浏览器标签页">
-                  {state?.browser.tabs.map((tab) => {
+                  {panelBrowser?.tabs.map((tab) => {
                     const label = tab.url ? tab.title || tab.url : tab.sessionBound ? 'Agent 浏览器' : '新标签页'
-                    const selected = state.browser.activeTabId === tab.id
+                    const selected = panelBrowser.activeTabId === tab.id
                     return <div key={tab.id} className={`browser-tab${selected ? ' active' : ''}`} title={label}>
                       <button className="browser-tab-main" type="button" role="tab" aria-selected={selected} onClick={() => void desktopApi.selectBrowserTab(tab.id)}>
                         {tab.loading ? <RotateCw className="browser-tab-loading" aria-label="正在加载" /> : <span className="browser-tab-favicon" aria-hidden="true"><Globe2 />{tab.faviconUrl ? <img src={tab.faviconUrl} alt="" referrerPolicy="no-referrer" onError={(event) => { event.currentTarget.hidden = true }} /> : null}</span>}<span className="browser-tab-title">{label}</span>{tab.agentActive ? <AgentPointerIcon className="browser-agent-pointer" /> : null}
@@ -1510,20 +1524,20 @@ export function App(): ReactNode {
                 <button type="button" aria-label="前进" disabled={!state?.browser.canGoForward} onClick={() => void desktopApi.browserNavigationAction('forward')}><ArrowRight /></button>
                 <button type="button" aria-label={state?.browser.loading ? '停止加载' : '重新加载'} onClick={() => void desktopApi.browserNavigationAction(state?.browser.loading ? 'stop' : 'reload')}><RotateCw className={state?.browser.loading ? 'browser-loading' : ''} /></button>
               </div>
-              <BrowserAddressInput className="browser-address" url={state?.browser.url ?? ''} onNavigate={navigateBrowser} />
+              <BrowserAddressInput className="browser-address" url={panelBrowser?.url ?? ''} onNavigate={navigateBrowser} />
               <div className="browser-actions">
                 <button type="button" data-browser-menu-trigger aria-label="浏览器设置" aria-expanded={browserSettingsMenuOpen} onClick={(event) => openBrowserMenu('settings', event.currentTarget)}><MoreVertical /></button>
               </div>
               </div>
             </header>
-            {state?.browser.viewport ? (
+            {panelBrowser?.viewport ? (
               <div className="browser-device-toolbar">
                 <strong>尺寸:</strong><span>响应式</span>
-                <input key={`width-${String(state.browser.viewport.width)}`} type="number" min={240} max={3840} defaultValue={state.browser.viewport.width} aria-label="设备宽度" onBlur={(event) => setDeviceViewport(Number(event.currentTarget.value), state.browser.viewport?.height ?? 860)} />
+                <input key={`width-${String(panelBrowser.viewport.width)}`} type="number" min={240} max={3840} defaultValue={panelBrowser.viewport.width} aria-label="设备宽度" onBlur={(event) => setDeviceViewport(Number(event.currentTarget.value), panelBrowser.viewport?.height ?? 860)} />
                 <span>×</span>
-                <input key={`height-${String(state.browser.viewport.height)}`} type="number" min={240} max={2160} defaultValue={state.browser.viewport.height} aria-label="设备高度" onBlur={(event) => setDeviceViewport(state.browser.viewport?.width ?? 583, Number(event.currentTarget.value))} />
-                <button type="button" aria-label="旋转设备" title="旋转设备" onClick={() => setDeviceViewport(state.browser.viewport?.height ?? 860, state.browser.viewport?.width ?? 583)}><TabletSmartphone /></button>
-                <span>{Math.round((state.browser.zoomFactor ?? 1) * 100)}%</span>
+                <input key={`height-${String(panelBrowser.viewport.height)}`} type="number" min={240} max={2160} defaultValue={panelBrowser.viewport.height} aria-label="设备高度" onBlur={(event) => setDeviceViewport(panelBrowser.viewport?.width ?? 583, Number(event.currentTarget.value))} />
+                <button type="button" aria-label="旋转设备" title="旋转设备" onClick={() => setDeviceViewport(panelBrowser.viewport?.height ?? 860, panelBrowser.viewport?.width ?? 583)}><TabletSmartphone /></button>
+                <span>{Math.round((panelBrowser.zoomFactor ?? 1) * 100)}%</span>
                 <button className="device-toolbar-close" type="button" aria-label="关闭设备工具栏" title="关闭设备工具栏" onClick={() => void desktopApi.setBrowserDeviceViewport(null)}><X /></button>
               </div>
             ) : null}
@@ -1577,7 +1591,7 @@ export function App(): ReactNode {
                     ))}
                   </div>
                 </section>
-              ) : state?.browser.url && renderedBrowserViewport ? (
+              ) : panelBrowser?.url && renderedBrowserViewport ? (
                 <div className="browser-device-stage">
                   <div className="browser-device-frame" style={{ width: Math.round(renderedBrowserViewport.width * browserDeviceScale) + BROWSER_DEVICE_FRAME_GUTTER * 2, height: browserDeviceRenderedHeight + BROWSER_DEVICE_FRAME_GUTTER * 2 }}>
                     <div ref={browserViewHost} className="browser-view-host">
@@ -1586,7 +1600,7 @@ export function App(): ReactNode {
                     {['n', 'e', 's', 'w', 'ne', 'se', 'sw', 'nw'].map((direction) => <div key={direction} className={`device-resize-handle ${direction}`} onPointerDown={(event) => startDeviceResize(event, direction)} />)}
                   </div>
                 </div>
-              ) : state?.browser.url ? <div ref={browserViewHost} className="browser-view-host">
+              ) : panelBrowser?.url ? <div ref={browserViewHost} className="browser-view-host">
                 {browserShellSnapshot ? <img className="browser-shell-snapshot" src={browserShellSnapshot.dataUrl} alt="" aria-hidden="true" style={{ left: browserShellSnapshot.left, top: browserShellSnapshot.top, width: browserShellSnapshot.width, height: browserShellSnapshot.height }} /> : null}
               </div> : (
                 <section className="browser-welcome"><Globe2 aria-hidden="true" /><h2>内置浏览器</h2><p>在上方输入网址，或让 Agent 在后台打开网页。</p></section>

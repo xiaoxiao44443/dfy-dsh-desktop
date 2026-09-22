@@ -230,6 +230,7 @@ describe('Harness runtime update policy', () => {
       const manager = new HarnessRuntimeManager(userData, process.execPath, bundledRoot)
       await manager.initialize()
       const installVersion = vi.fn(async () => undefined)
+      vi.spyOn(manager, 'harnessHome', 'get').mockReturnValue(join(root, 'dsh-home'))
       ;(manager as unknown as { installVersion: typeof installVersion }).installVersion = installVersion
       vi.stubGlobal('fetch', vi.fn(async () => ({
         ok: true,
@@ -309,6 +310,7 @@ describe('Harness runtime update policy', () => {
       await writeRuntimeFixture(bundledRoot, '0.1.7-alpha.2')
       const manager = new HarnessRuntimeManager(userData, process.execPath, bundledRoot)
       await manager.initialize()
+      vi.spyOn(manager, 'harnessHome', 'get').mockReturnValue(join(root, 'dsh-home'))
       ;(manager as unknown as { installVersion: (version: string, onProgress: (progress: number, message: string) => void) => Promise<void> }).installVersion = async (version, onProgress) => {
         onProgress(82, '下载完成，正在检查运行时文件…')
         await writeRuntimeFixture(join(userData, 'harness-runtime', 'versions', version), version)

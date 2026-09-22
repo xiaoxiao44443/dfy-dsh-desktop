@@ -148,6 +148,9 @@ export interface PluginActivationOutcome {
 export interface PluginRecoveryEntry {
   entryId: string
   pluginName: string
+  displayName?: string
+  bundleName?: string
+  bundleTitle?: string
 }
 
 export interface PluginInitializationFailure extends PluginRecoveryEntry {
@@ -284,7 +287,7 @@ export interface DesktopState {
   harnessLifecycle: HarnessLifecycle
   harnessMessage?: string
   runtimePreparationProgress?: number
-  pluginFailure?: PluginInitializationFailure
+  pluginFailures?: PluginInitializationFailure[]
   disabledPlugins: PluginRecoveryEntry[]
   updateStatus: HarnessUpdateStatus
   updateVersion?: string
@@ -320,7 +323,7 @@ export interface DesktopBridge {
   copyDevelopmentHarnessUrl(): Promise<void>
   openDevelopmentHarnessUrl(): Promise<void>
   setDevelopmentCliEnabled(enabled: boolean): Promise<void>
-  recoverFailedPlugin(): Promise<void>
+  recoverFailedPlugins(entryIds: string[]): Promise<void>
   restoreRecoveredPlugin(entryId: string): Promise<void>
   runDevelopmentPlugin(request: DevelopmentPluginRequest): Promise<void>
   getPluginInventory(): Promise<PluginInventory>

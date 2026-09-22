@@ -7,7 +7,7 @@ export const DFY_PLUGIN_CATALOG_URL = 'https://raw.githubusercontent.com/xiaoxia
 // Used until the remote directory is available, including on a first offline launch.
 export const DFY_PLUGINS: DfyPluginDefinition[] = [
   { name: '@dfy-plugins/dsh-wallpaper', title: '壁纸', category: '界面', description: '为主界面、设置面板和右侧栏分别设置背景图片与显示效果。' },
-  { name: '@dfy-plugins/dsh-appearance', title: '外观', category: '界面', description: '调整对话字号、过程轨迹折叠和本地文件的打开方式。' },
+  { name: '@dfy-plugins/dsh-appearance', title: '外观', category: '界面', description: '调整对话字号、行距和本地文件的打开方式。' },
   { name: '@dfy-plugins/dsh-archive-manager', title: '归档管理', category: '对话', description: '按项目浏览归档对话，支持恢复和永久删除。' },
   { name: '@dfy-plugins/dsh-media-blocks', title: '媒体内容', category: '图片', description: '展示持久图片内容，并为视觉和生图插件提供媒体增强。' },
   { name: '@dfy-plugins/dsh-image-generation', title: '图像生成', category: '图片', description: '在对话中生成和编辑图片，支持参考图与结果预览。', note: '安装后需配置图片模型。' },
@@ -18,7 +18,7 @@ export const DFY_PLUGINS: DfyPluginDefinition[] = [
 
 DFY_PLUGINS.unshift({
   name: '@dfy-plugins/dsh-bundle', title: 'DFY 插件组合包', category: '组合包',
-  description: '一次安装 8 个 DFY 插件，统一更新；进入官方详情页可分别启停。',
+  description: '集中安装 DFY 插件，统一更新；进入详情可分别启停各个插件。',
   note: '包含以下单独插件，可选整包或按需安装。',
   repository: `${DFY_PLUGIN_REPOSITORY_URL}/tree/main/plugins/bundle`,
   includes: DFY_PLUGINS.map(entry => entry.name),

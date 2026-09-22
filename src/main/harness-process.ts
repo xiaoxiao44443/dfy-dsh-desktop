@@ -6,7 +6,8 @@ import type { Readable } from 'node:stream'
 import type { HarnessRuntimeCandidate } from './harness-runtime.js'
 import { HarnessToolchainManager, prependToolchainToPath } from './harness-toolchain.js'
 import type { HarnessDesktopBridgeLaunch } from './harness-desktop-bridge.js'
-import { parsePluginInitializationFailure, PluginInitializationError } from './plugin-recovery.js'
+import { parsePluginInitializationFailures, PluginInitializationError } from './plugin-recovery.js'
+import type { PluginInitializationFailure } from '../shared/contracts.js'
 import { DesktopPluginLinkError, ensureDesktopPluginLinks } from './harness-plugin-links.js'
 
 const URL_PATTERN = /dsh web:\s+(http:\/\/127\.0\.0\.1:\d+(?:\/[^\s]*)?)/u
@@ -43,6 +44,7 @@ export function withHarnessStartupOutput(error: unknown, startupOutput: string):
 export interface RunningHarness {
   candidate: HarnessRuntimeCandidate
   url: string
+  pluginFailures: PluginInitializationFailure[]
 }
 
 export interface HarnessLaunchOptions {
@@ -105,6 +107,7 @@ export class HarnessProcess extends EventEmitter {
       env: {
         ...environment,
         DSH_DESKTOP: '1',
+        DSH_DESKTOP_HIDDEN_CONSOLE: '1',
         DSH_DESKTOP_RUNTIME_VERSION: candidate.version,
         DSH_DESKTOP_DSH_COMMAND: toolchain.dshCommand,
         DSH_DESKTOP_PNPM_COMMAND: toolchain.pnpmCommand,
@@ -143,14 +146,14 @@ export class HarnessProcess extends EventEmitter {
       this.activeCandidate = candidate
       this.activeEnvironment = environment
       this.activePnpmEntry = toolchain.pnpmEntry
-      return { candidate, url }
+      return { candidate, url, pluginFailures: parsePluginInitializationFailures(startupOutput) }
     } catch (error) {
       if (error instanceof DesktopPluginLinkError) {
         await this.stop()
         throw error
       }
-      const failure = parsePluginInitializationFailure(startupOutput)
-      if (failure !== undefined) throw new PluginInitializationError(failure)
+      const failures = parsePluginInitializationFailures(startupOutput)
+      if (failures.length > 0) throw new PluginInitializationError(failures)
       throw withHarnessStartupOutput(error, startupOutput)
     } finally {
       child.stdout.off('data', captureStartupOutput)
@@ -219,6 +222,7 @@ export class HarnessProcess extends EventEmitter {
         env: {
           ...environment,
           DSH_DESKTOP: '1',
+          DSH_DESKTOP_HIDDEN_CONSOLE: '1',
           DSH_DESKTOP_DIRECTORY_PICKER_URL: this.directoryPickerUrl,
           ELECTRON_RUN_AS_NODE: '1',
           ELECTRON_NO_ATTACH_CONSOLE: '1',

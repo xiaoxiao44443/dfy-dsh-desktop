@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   parsePluginInitializationFailure,
+  parsePluginInitializationFailures,
   PluginRecoveryService,
 } from '../src/main/plugin-recovery.js'
 
@@ -62,5 +63,61 @@ describe('plugin initialization recovery', () => {
 
     await service.restore('broken-entry')
     expect(service.disabledPlugins).toEqual([{ entryId: 'old-entry', pluginName: 'old-plugin' }])
+  })
+
+  it('collects all grouped fatal causes, preserving stacks and excluding waiting services', () => {
+    const failures = parsePluginInitializationFailures(`dsh: startup failed: 1 required plugin did not activate
+
+Failed plugins (2):
+  wallpaper
+    Package: @dfy-plugins/dsh-wallpaper
+    TypeError: invalid configuration
+        at apply (plugin.js:10:2)
+  webserver (required)
+    Package: @deepseek-ai/dsh-host-webserver
+    Error: port occupied
+
+Plugins waiting for services (1):
+  Plugin                  Missing services
+  connection (required)   webServer
+`)
+    expect(failures).toEqual([
+      { entryId: 'wallpaper', pluginName: '@dfy-plugins/dsh-wallpaper', detail: 'TypeError: invalid configuration\n    at apply (plugin.js:10:2)', recoverable: true },
+      { entryId: 'webserver', pluginName: '@deepseek-ai/dsh-host-webserver', detail: 'Error: port occupied', recoverable: false },
+    ])
+  })
+
+  it('recognizes optional import failures and deduplicates repeated loader diagnostics', () => {
+    expect(parsePluginInitializationFailures(`failed to import loader entry missing (missing-package): not found
+dsh: warning: 3 entries did not activate
+missing (missing-package): failed to import
+broken (broken-package): Error: deliberate failure
+    at example.js:1:2
+client (client-package): pending (waiting for service: broken)
+`)).toEqual([
+      { entryId: 'missing', pluginName: 'missing-package', detail: 'not found', recoverable: true },
+      { entryId: 'broken', pluginName: 'broken-package', detail: 'Error: deliberate failure\n    at example.js:1:2', recoverable: true },
+    ])
+  })
+
+  it('validates a batch before writing, disables only selected components, and retains recovery labels', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'desktop-plugin-recovery-'))
+    temporaryPaths.push(root)
+    const patchPath = join(root, 'recovery.json')
+    const service = new PluginRecoveryService(patchPath)
+    await service.initialize()
+    const broken = { entryId: 'first', pluginName: '@example/first', detail: 'broken', recoverable: true, displayName: '插件一', bundleName: '@example/bundle', bundleTitle: '示例组合包' }
+    const protectedEntry = { entryId: 'webserver', pluginName: '@deepseek-ai/dsh-host-webserver', detail: 'broken', recoverable: true }
+    await expect(service.disableMany([broken, protectedEntry])).rejects.toThrow('不能')
+    expect(JSON.parse(await readFile(patchPath, 'utf8'))).toEqual([])
+    expect(service.disabledPlugins).toEqual([])
+    await service.disableMany([broken, { entryId: 'second', pluginName: '@example/second', detail: 'broken', recoverable: true }])
+    expect(JSON.parse(await readFile(patchPath, 'utf8'))).toEqual([
+      { id: 'first', name: '@example/first', disabled: true },
+      { id: 'second', name: '@example/second', disabled: true },
+    ])
+    expect(service.disabledPlugins[0]).toMatchObject({ displayName: '插件一', bundleTitle: '示例组合包' })
+    await service.restore('first')
+    expect(service.disabledPlugins.map((entry) => entry.entryId)).toEqual(['second'])
   })
 })

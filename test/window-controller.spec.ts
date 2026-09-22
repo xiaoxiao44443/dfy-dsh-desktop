@@ -745,7 +745,7 @@ describe('configured native theme synchronization', () => {
     const executeJavaScript = vi.fn().mockResolvedValue('light')
     vi.spyOn(access, 'findHarnessFrame').mockReturnValue({ executeJavaScript })
     await expect(access.readConfiguredTheme()).resolves.toBe('light')
-    expect(executeJavaScript).toHaveBeenCalledWith('document.documentElement.getAttribute("data-ds-theme-source")')
+    expect(executeJavaScript).toHaveBeenCalledWith('document.documentElement?.getAttribute("data-ds-theme-source")')
     expect(electronMocks.nativeTheme.source).toBe('light')
     executeJavaScript.mockResolvedValue('dark')
     await expect(access.readConfiguredTheme()).resolves.toBe('dark')
@@ -846,6 +846,42 @@ describe('Harness release URL', () => {
 })
 
 describe('WindowController Harness reload', () => {
+  it('batch-disables only selected current failures and restarts exactly once', async () => {
+    const runtime = Object.assign(new EventEmitter(), { harnessHome: '/absent', updateState: { status: 'idle' } })
+    const development = Object.assign(new EventEmitter(), { state: {}, restartHarness: vi.fn(async () => {}) })
+    const recovery = {
+      disabledPlugins: [], describe: vi.fn(async (entries) => entries), disableMany: vi.fn(async () => {}),
+    }
+    const controller = new WindowController(runtime as never, development as never, recovery as never)
+    await controller.create()
+    const failures = ['one', 'two', 'three'].map((id) => ({ entryId: id, pluginName: `@example/${id}`, detail: 'failed', recoverable: true }))
+    await controller.reportPluginFailures([...failures, { entryId: 'bridge', pluginName: 'dsh-desktop-bridge', detail: 'failed', recoverable: false }])
+    const recover = electronMocks.ipcHandlers.get('desktop:plugin-recovery-disable')!
+    await expect(recover({}, ['one', 'stale'])).rejects.toThrow('已不在')
+    await expect(recover({}, ['one', 'bridge'])).rejects.toThrow('已不在')
+    await expect(recover({}, [])).rejects.toThrow('请选择')
+    expect(recovery.disableMany).not.toHaveBeenCalled()
+    await recover({}, ['one', 'three', 'one'])
+    expect(recovery.disableMany).toHaveBeenCalledExactlyOnceWith([failures[0], failures[2]])
+    expect(development.restartHarness).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps optional failures non-blocking and ignores metadata finishing after a restart', async () => {
+    const runtime = Object.assign(new EventEmitter(), { harnessHome: '/absent', updateState: { status: 'idle' } })
+    const development = Object.assign(new EventEmitter(), { state: {} })
+    const controller = new WindowController(runtime as never, development as never)
+    await controller.create()
+    Object.assign(controller, { harnessLifecycle: 'ready', harnessUrl: 'http://127.0.0.1:1111' })
+    const failures = [{ entryId: 'test', pluginName: 'test-package', detail: 'failed', recoverable: true }]
+    await controller.reportPluginFailures(failures)
+    expect(electronMocks.window?.webContents.send.mock.calls.at(-1)?.[1]).toMatchObject({ harnessLifecycle: 'ready', pluginFailures: failures })
+    // describe() yields even without the optional metadata service.
+    const pending = controller.reportPluginFailures(failures)
+    controller.setHarnessStarting('0.1.7-alpha.1')
+    await pending
+    expect(electronMocks.window?.webContents.send.mock.calls.at(-1)?.[1].pluginFailures).toBeUndefined()
+  })
+
   it('checks, downloads, and opens a prepared desktop installer only on explicit actions', async () => {
     const runtime = Object.assign(new EventEmitter(), {
       harnessHome: '/path/that/does/not/exist',

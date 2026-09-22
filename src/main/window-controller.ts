@@ -8,7 +8,7 @@ import { DESKTOP_CONTEXT_MENU_TRANSPORT_KEY, parsePluginContextMenuCollection } 
 import { RUNTIME_PREPARATION_PROGRESS_EVENT, type HarnessRuntimeManager } from './harness-runtime.js'
 import type { DevelopmentService } from './development-service.js'
 import type { PluginManagementService } from './plugin-management.js'
-import { parsePluginInitializationFailure, type PluginRecoveryService } from './plugin-recovery.js'
+import { parsePluginInitializationFailures, type PluginRecoveryService } from './plugin-recovery.js'
 import { appendPluginContextMenuItems, BUILTIN_CONTEXT_MENU_ACTIONS, buildBuiltinContextMenuItems } from './context-menu.js'
 import { installWindowMenuDismissal } from './window-menu-dismissal.js'
 import { BrowserDevToolsController } from './browser-devtools.js'
@@ -85,7 +85,8 @@ export class WindowController {
   private harnessLifecycle: HarnessLifecycle = 'stopped'
   private harnessMessage: string | undefined
   private runtimePreparationProgress: number | undefined
-  private pluginFailure: PluginInitializationFailure | undefined
+  private pluginFailures: PluginInitializationFailure[] = []
+  private pluginDiagnosticGeneration = 0
   private harnessVersion: string | undefined
   private harnessUrl: string | undefined
   private harnessLoadId = 0
@@ -300,7 +301,8 @@ export class WindowController {
     this.harnessUrl = undefined
     this.harnessOrigin = undefined
     this.harnessLifecycle = 'starting'
-    this.pluginFailure = undefined
+    this.pluginFailures = []
+    this.pluginDiagnosticGeneration += 1
     this.runtimePreparationProgress = undefined
     this.harnessMessage = app.isPackaged && process.platform === 'win32'
       ? '首次启动正在解压 Harness 运行时，请稍候…'
@@ -317,7 +319,8 @@ export class WindowController {
     this.harnessUrl = undefined
     this.harnessOrigin = undefined
     this.harnessLifecycle = 'starting'
-    this.pluginFailure = undefined
+    this.pluginFailures = []
+    this.pluginDiagnosticGeneration += 1
     this.runtimePreparationProgress = undefined
     this.harnessMessage = '正在启动 Harness…'
     this.publishState()
@@ -331,7 +334,8 @@ export class WindowController {
     this.harnessLoadId += 1
     this.harnessOrigin = new URL(url).origin
     this.harnessLifecycle = 'starting'
-    this.pluginFailure = undefined
+    this.pluginFailures = []
+    this.pluginDiagnosticGeneration += 1
     this.runtimePreparationProgress = undefined
     this.harnessMessage = '正在加载 Harness 界面…'
 
@@ -352,7 +356,7 @@ export class WindowController {
     await loadPromise
   }
 
-  setHarnessError(message: string, pluginFailure?: PluginInitializationFailure): void {
+  setHarnessError(message: string): void {
     this.resetContextMenu()
     this.stopThemeSync()
     this.stopPluginFailureProbe()
@@ -360,9 +364,19 @@ export class WindowController {
     this.harnessLifecycle = 'error'
     this.harnessMessage = message
     this.runtimePreparationProgress = undefined
-    this.pluginFailure = pluginFailure
     this.harnessUrl = undefined
     this.harnessOrigin = undefined
+    this.publishState()
+  }
+
+  async reportPluginFailures(failures: PluginInitializationFailure[]): Promise<void> {
+    if (failures.length === 0) return
+    const generation = this.pluginDiagnosticGeneration
+    const described = await this.pluginRecovery?.describe(failures) ?? failures
+    if (generation !== this.pluginDiagnosticGeneration) return
+    const combined = new Map(this.pluginFailures.map((failure) => [`${failure.entryId}\0${failure.pluginName}`, failure]))
+    for (const failure of described) combined.set(`${failure.entryId}\0${failure.pluginName}`, failure)
+    this.pluginFailures = [...combined.values()]
     this.publishState()
   }
 
@@ -492,7 +506,7 @@ export class WindowController {
       if (event.sender !== this.window?.webContents || typeof enabled !== 'boolean') return
       return this.development.setCliEnabled(enabled)
     })
-    ipcMain.handle('desktop:plugin-recovery-disable', async () => await this.recoverFailedPlugin())
+    ipcMain.handle('desktop:plugin-recovery-disable', async (_event, entryIds: unknown) => await this.recoverFailedPlugins(entryIds))
     ipcMain.handle('desktop:plugin-recovery-restore', async (_event, entryId: string) => await this.restoreRecoveredPlugin(entryId))
     ipcMain.handle('desktop:development-run-plugin', (_event, request: DevelopmentPluginRequest) => this.development.runPlugin(request))
     ipcMain.handle('desktop:plugins-inventory', (event) => {
@@ -1136,7 +1150,6 @@ export class WindowController {
     this.harnessLifecycle = 'ready'
     this.harnessMessage = undefined
     this.runtimePreparationProgress = undefined
-    this.pluginFailure = undefined
     this.startThemeSync()
     this.startPluginFailureProbe()
     this.publishState()
@@ -1179,7 +1192,7 @@ export class WindowController {
       ...(this.runtimePreparationProgress !== undefined
         ? { runtimePreparationProgress: this.runtimePreparationProgress }
         : {}),
-      ...(this.pluginFailure !== undefined ? { pluginFailure: { ...this.pluginFailure } } : {}),
+      ...(this.pluginFailures.length > 0 ? { pluginFailures: this.pluginFailures.map((failure) => ({ ...failure })) } : {}),
       disabledPlugins: this.pluginRecovery?.disabledPlugins ?? [],
       updateStatus: update.status,
       ...(update.version !== undefined ? { updateVersion: update.version } : {}),
@@ -1265,11 +1278,15 @@ export class WindowController {
     this.harnessLoadProbeTimer = undefined
   }
 
-  private async recoverFailedPlugin(): Promise<void> {
+  private async recoverFailedPlugins(entryIds: unknown): Promise<void> {
     if (this.pluginRecovery === undefined) throw new Error('插件恢复服务不可用。')
-    const failure = this.pluginFailure
-    if (failure === undefined) throw new Error('当前没有可恢复的插件初始化错误。')
-    await this.pluginRecovery.disable(failure)
+    if (!Array.isArray(entryIds) || entryIds.length === 0 || entryIds.some((id) => typeof id !== 'string')) throw new Error('请选择要临时禁用的报错插件。')
+    const failures = [...new Set(entryIds)].map((id) => {
+      const matches = this.pluginFailures.filter((failure) => failure.entryId === id)
+      if (matches.length !== 1 || !matches[0]?.recoverable) throw new Error('所选插件已不在可恢复的错误列表中，请刷新后重试。')
+      return matches[0]
+    })
+    await this.pluginRecovery.disableMany(failures)
     await this.development.restartHarness()
   }
 
@@ -1303,11 +1320,13 @@ export class WindowController {
     const frame = this.findHarnessFrame()
     if (frame === undefined) return
     this.pluginFailureProbeInFlight = true
+    const generation = this.pluginDiagnosticGeneration
     try {
       const text = await frame.executeJavaScript(`(document.body?.innerText ?? '').slice(0, 32000)`) as string
-      const failure = parsePluginInitializationFailure(text)
-      if (failure === undefined) return
-      this.setHarnessError(`插件“${failure.pluginName}”初始化失败：${failure.detail}`, failure)
+      const failures = parsePluginInitializationFailures(text)
+      if (failures.length === 0 || generation !== this.pluginDiagnosticGeneration) return
+      this.setHarnessError(`有 ${failures.length} 个插件加载失败，请查看下方原因。`)
+      await this.reportPluginFailures(failures)
     } catch {
       // The Harness iframe can be replaced while a restart is in progress.
     } finally {
@@ -1346,7 +1365,7 @@ export class WindowController {
       // then keeps this attribute current when the user changes Appearance.
       const frame = this.findHarnessFrame()
       if (frame !== undefined) {
-        const value: unknown = await frame.executeJavaScript('document.documentElement.getAttribute("data-ds-theme-source")')
+        const value: unknown = await frame.executeJavaScript('document.documentElement?.getAttribute("data-ds-theme-source")')
         const preference = parseHarnessThemePreference(value)
         if (preference !== undefined) return preference
       }

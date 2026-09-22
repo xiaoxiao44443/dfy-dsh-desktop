@@ -169,12 +169,14 @@ if (!app.requestSingleInstanceLock()) {
       for (const candidate of await runtime.launchCandidates()) {
         windows.setHarnessStarting(candidate.version)
         try {
+          await pluginRecovery.setDiagnosticContext({ executable: process.execPath, harnessEntry: candidate.entryPath, profilePath: join(runtime.harnessHome, 'profiles', 'web') })
           await runtime.assertSessionCompatibility(candidate)
           const running = await harness.start(candidate, settings)
           await runtime.markHealthy(candidate)
           development?.setHarnessVersion(candidate.version)
           await development?.refreshCli()
           await windows.showHarness(running.url, candidate.version)
+          await windows.reportPluginFailures(running.pluginFailures)
           debugLog(`[desktop] Harness ${candidate.version} ready at ${running.url}`)
           started = true
           break
@@ -195,8 +197,9 @@ if (!app.requestSingleInstanceLock()) {
       if (!started) {
         const message = pluginFailure === undefined
           ? `无法启动 DeepSeek Harness。${failures.join('；')}`
-          : `插件“${pluginFailure.failure.pluginName}”初始化失败：${pluginFailure.failure.detail}`
-        windows.setHarnessError(message, pluginFailure?.failure)
+          : `有 ${pluginFailure.failures.length} 个插件加载失败，请查看下方原因。`
+        windows.setHarnessError(message)
+        if (pluginFailure !== undefined) await windows.reportPluginFailures(pluginFailure.failures)
         throw new Error(message)
       }
     }

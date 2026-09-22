@@ -54,11 +54,6 @@ window.__ModuleLoader__.load({
         .dsh-desktop-browser-menu-trigger { min-width: 146px; height: 36px; padding: 0 14px; border: 0; border-radius: 18px; color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-module-platform); font: inherit; font-size: 14px; cursor: pointer; display: inline-flex; align-items: center; justify-content: space-between; gap: 12px; transition: background 120ms ease; }
         .dsh-desktop-browser-menu-trigger:hover, .dsh-desktop-browser-menu-trigger[data-open="true"] { background: var(--dsw-alias-interactive-bg-hover); }
         .dsh-desktop-browser-menu-trigger:disabled { cursor: default; opacity: .55; }
-        .dsh-desktop-browser-switch { width: 36px; height: 22px; padding: 2px; border: 0; border-radius: 999px; background: var(--dsw-alias-bg-module-platform); cursor: pointer; transition: background 120ms ease, opacity 120ms ease; }
-        .dsh-desktop-browser-switch[aria-checked="true"] { background: var(--dsw-alias-state-business-primary); }
-        .dsh-desktop-browser-switch:disabled { cursor: default; opacity: .55; }
-        .dsh-desktop-browser-switch span { display: block; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.28); transform: translateX(0); transition: transform 120ms ease; }
-        .dsh-desktop-browser-switch[aria-checked="true"] span { transform: translateX(14px); }
         .dsh-desktop-browser-action { min-height: 34px; padding: 0 14px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; color: var(--dsw-alias-label-primary); background: transparent; font: inherit; font-size: 13px; font-weight: 400; cursor: pointer; transition: background 120ms ease, color 120ms ease; }
         .dsh-desktop-browser-action:hover { background: var(--dsw-alias-interactive-bg-hover); }
         .dsh-desktop-browser-action[data-confirm="true"] { color: #ef6b73; }
@@ -84,18 +79,6 @@ window.__ModuleLoader__.load({
         React.createElement("circle", { cx: 16, cy: 11.5, r: 1.5, fill: "currentColor" }),
         React.createElement("path", { d: "m25 24 15 7-7 2-3 7-5-16Z", fill: "var(--dsw-alias-bg-base)", stroke: "currentColor", strokeWidth: 2.6, strokeLinejoin: "round" })
       );
-    }
-
-    function Toggle({ checked, disabled, label, onChange }) {
-      return React.createElement("button", {
-        className: "dsh-desktop-browser-switch",
-        type: "button",
-        role: "switch",
-        "aria-checked": checked,
-        "aria-label": label,
-        disabled,
-        onClick: () => onChange(!checked)
-      }, React.createElement("span", null));
     }
 
     function OpenModeMenu({ value, disabled, onChange }) {
@@ -240,7 +223,7 @@ window.__ModuleLoader__.load({
             React.createElement("div", { className: "dsh-desktop-browser-title" }, "浏览器"),
             React.createElement("div", { className: "dsh-desktop-browser-description" }, "让 DFY DSH Desktop 控制内置浏览器")
           ),
-          React.createElement(Toggle, {
+          React.createElement(Primitives.Switch, {
             checked: settings.enabled,
             disabled,
             label: "启用内置浏览器",

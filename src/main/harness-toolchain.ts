@@ -1,5 +1,5 @@
-import { access, chmod, mkdir, writeFile } from 'node:fs/promises'
-import { delimiter, dirname, join, resolve } from 'node:path'
+import { access, chmod, lstat, mkdir, readlink, symlink, unlink, writeFile } from 'node:fs/promises'
+import { basename, delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { HarnessRuntimeCandidate } from './harness-runtime.js'
 
@@ -16,12 +16,35 @@ export interface HarnessToolchain {
   nodeCommand: string
 }
 
-function cmdQuoted(value: string): string {
-  return `"${value.replaceAll('%', '%%').replaceAll('"', '""')}"`
-}
-
 function shellQuoted(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`
+}
+
+function windowsNodeShim(command: string): string {
+  return [
+    '@echo off',
+    'setlocal DisableDelayedExpansion',
+    'set "ELECTRON_RUN_AS_NODE=1"',
+    'set "ELECTRON_NO_ATTACH_CONSOLE="',
+    command,
+    'endlocal & exit /b %ERRORLEVEL%',
+    '',
+  ].join('\r\n')
+}
+
+async function ensureToolchainDirectoryLink(path: string, target: string): Promise<void> {
+  const existing = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return undefined
+    throw error
+  })
+  if (existing !== undefined) {
+    if (!existing.isSymbolicLink()) throw new Error(`工具链链接位置已存在文件或目录，未覆盖：${path}`)
+    const current = resolve(dirname(path), await readlink(path))
+    if (current.toLowerCase() === resolve(target).toLowerCase()) return
+    // Remove only our link, never the runtime directory it points to.
+    await unlink(path)
+  }
+  await symlink(resolve(target), path, 'junction')
 }
 
 function posixNodeShim(command: string, platform: NodeJS.Platform): string {
@@ -119,19 +142,31 @@ export class HarnessToolchainManager {
     const pnpmCommand = join(this.binPath, `pnpm${suffix}`)
     const nodeCommand = join(this.binPath, `node${suffix}`)
     if (windows) {
-      const nodeMode = '@set "ELECTRON_RUN_AS_NODE=1"\r\n@set "ELECTRON_NO_ATTACH_CONSOLE=1"\r\n'
+      // Keep .cmd source ASCII. cmd.exe expands %~dp0 as Unicode regardless of
+      // its code page; junctions provide stable names for the runtime paths.
+      // Changing chcp instead clears/redraws ConPTY screens and erases output.
+      await ensureToolchainDirectoryLink(join(this.binPath, 'electron-runtime'), dirname(this.electronExecutable))
+      await ensureToolchainDirectoryLink(join(this.binPath, 'pnpm-runtime'), dirname(pnpmEntry))
+      const electron = `"%~dp0electron-runtime\\${basename(this.electronExecutable)}"`
+      // JavaScript reads UTF-8 paths without touching console state. A small
+      // loader also supports the packaged bootstrap inside resources/app.asar.
+      await writeFile(join(this.binPath, 'dsh-cli.cjs'), [
+        `process.argv.splice(1, 1, ${JSON.stringify(HARNESS_BOOTSTRAP)}, ${JSON.stringify(candidate.entryPath)});`,
+        `require(${JSON.stringify(HARNESS_BOOTSTRAP)});`,
+        '',
+      ].join('\n'), 'utf8')
       await Promise.all([
         writeFile(
           dshCommand,
-          `${nodeMode}@${cmdQuoted(this.electronExecutable)} --expose-internals ${cmdQuoted(HARNESS_BOOTSTRAP)} ${cmdQuoted(candidate.entryPath)} %*\r\n`,
+          windowsNodeShim(`${electron} --expose-internals "%~dp0dsh-cli.cjs" %*`),
           'utf8',
         ),
         writeFile(
           pnpmCommand,
-          `${nodeMode}@${cmdQuoted(this.electronExecutable)} ${cmdQuoted(pnpmEntry)} ${PNPM_DESKTOP_CONFIG} %*\r\n`,
+          windowsNodeShim(`${electron} "%~dp0pnpm-runtime\\${basename(pnpmEntry)}" ${PNPM_DESKTOP_CONFIG} %*`),
           'utf8',
         ),
-        writeFile(nodeCommand, `${nodeMode}@${cmdQuoted(this.electronExecutable)} %*\r\n`, 'utf8'),
+        writeFile(nodeCommand, windowsNodeShim(`${electron} %*`), 'utf8'),
       ])
     } else {
       await Promise.all([

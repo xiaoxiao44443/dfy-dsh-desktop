@@ -83,4 +83,39 @@ describe('Windows runner console preload', () => {
       request: { type: 'start' }, calls: [['GetConsoleWindow'], ['AttachConsole', 0xffffffff]], args: ['--', 'cmd.exe'],
     }])
   })
+
+  it.each([true, false])('supplies Node mode only to a nested Electron ACL runner (nested: %s)', async (nested) => {
+    const aclEntry = '/runtime/node_modules/@deepseek-ai/dsh-sandbox-windows-acl/lib/runner.js'
+    const target = nested ? process.execPath : 'Code.exe'
+    const child = spawn(process.execPath, ['--require', platform, '--require', preload, entry, '--', target, aclEntry, '--mode', 'workspace-write'], {
+      env: { ...process.env, CONSOLE_CASE: 'attached' },
+      stdio: ['ignore', 'ignore', 'pipe', 'ipc'], windowsHide: true,
+    })
+    const messages: unknown[] = []
+    const result = await new Promise<{ code: number | null, stderr: string }>((resolveExit, reject) => {
+      let stderr = ''
+      child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf8') })
+      child.on('message', (message) => messages.push(message))
+      child.once('error', reject)
+      child.once('close', (code) => resolveExit({ code, stderr }))
+      child.send({ type: 'start', cwd: '/workspace', control: 'pipe', env: { MARKER: 'kept', ELECTRON_NO_ATTACH_CONSOLE: '1' } })
+    })
+    expect(result).toEqual({ code: 0, stderr: '' })
+    expect(messages).toEqual([{
+      request: { type: 'start', cwd: '/workspace', control: 'pipe', env: nested
+        ? { MARKER: 'kept', ELECTRON_RUN_AS_NODE: '1' }
+        : { MARKER: 'kept', ELECTRON_NO_ATTACH_CONSOLE: '1' } },
+      calls: [['GetConsoleWindow']],
+      args: ['--', target, ...(nested ? ['--require', preload] : []), aclEntry, '--mode', 'workspace-write'],
+    }])
+  })
+
+  it('does not leak Electron boot flags into commands launched by the ACL runner', async () => {
+    const checkEntry = join(root, 'check-environment.mjs')
+    await writeFile(checkEntry, 'console.log(JSON.stringify([process.env.ELECTRON_RUN_AS_NODE ?? null, process.env.ELECTRON_NO_ATTACH_CONSOLE ?? null]))')
+    const { stdout } = await execute(process.execPath, ['--require', platform, '--require', preload, checkEntry], {
+      env: { ...process.env, CONSOLE_CASE: 'attached', ELECTRON_RUN_AS_NODE: '1', ELECTRON_NO_ATTACH_CONSOLE: '1' },
+    })
+    expect(JSON.parse(stdout)).toEqual([null, null])
+  })
 })
