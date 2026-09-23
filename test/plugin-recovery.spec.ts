@@ -120,4 +120,39 @@ client (client-package): pending (waiting for service: broken)
     await service.restore('first')
     expect(service.disabledPlugins.map((entry) => entry.entryId)).toEqual(['second'])
   })
+
+  it('reports rc.1 admission refusals for a component and a whole bundle without offering recovery patches', () => {
+    const warning = 'Plugin @sample/component@1.2.0 is incompatible with dsh 0.1.7-rc.1: peerDependencies {"@deepseek-ai/dsh":"<0.1.7"}. Update the plugin.'
+    const failures = parsePluginInitializationFailures(`dsh: disabling profile plugin row "component": ${warning}\n`
+      + `dsh: skipping profile bundle "@sample/bundle": Error: ${warning.replace('@sample/component', '@sample/bundle')}\n`
+      + `dsh: disabling profile plugin row "component": ${warning}\n`)
+    expect(failures).toHaveLength(2)
+    expect(failures[0]).toMatchObject({ entryId: 'component', pluginName: '@sample/component', recoverable: false, blockedByCompatibility: true,
+      incompatibility: { name: '@sample/component', version: '1.2.0', runtimeVersion: '0.1.7-rc.1', peers: { '@deepseek-ai/dsh': '<0.1.7' } } })
+    expect(failures[0]?.detail).toContain('与当前 DSH 0.1.7-rc.1 不兼容')
+    expect(failures[1]).toMatchObject({ scope: 'bundle', bundleName: '@sample/bundle', pluginName: '@sample/bundle', recoverable: false })
+  })
+
+  it('handles id-less rows and metadata validation failures, ignoring unrelated output', () => {
+    const warning = 'Plugin @sample/component@1.0.0 is incompatible with dsh 0.1.7-rc.1: peerDependencies {"@deepseek-ai/dsh":">=9"}.'
+    const failures = parsePluginInitializationFailures(`dsh: disabling profile plugin file:///E:/plugin/index.js: ${warning}\n`
+      + 'dsh: disabling profile plugin row "broken": its declared peer dependencies cannot be validated: malformed manifest\n'
+      + `ordinary output: ${warning}\n`
+      + 'dsh: skipping profile bundle "unreadable": Error: no bundle declaration\n')
+    expect(failures).toHaveLength(2)
+    expect(failures[0]).toMatchObject({ entryId: 'file:///E:/plugin/index.js', pluginName: '@sample/component', blockedByCompatibility: true })
+    expect(failures[1]).toMatchObject({ entryId: 'broken', recoverable: false, blockedByCompatibility: true })
+    expect(failures[1]?.detail).toContain('malformed manifest')
+  })
+
+  it('never writes a compatibility refusal as a recovery override', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'desktop-compatibility-recovery-'))
+    temporaryPaths.push(root)
+    const patch = join(root, 'recovery.json')
+    const service = new PluginRecoveryService(patch)
+    await service.initialize()
+    await expect(service.disableMany([{ entryId: 'bundle', pluginName: 'bundle', recoverable: true,
+      blockedByCompatibility: true, detail: 'incompatible' }])).rejects.toThrow('不能')
+    expect(JSON.parse(await readFile(patch, 'utf8'))).toEqual([])
+  })
 })

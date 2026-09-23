@@ -781,6 +781,42 @@ window.__ModuleLoader__.load({
 			};
 		}
 		exports.installThemeWriteGuard = installThemeWriteGuard;
+		const THEME_SYNC_TRANSPORT_KEY = "dsh.desktop.theme-sync.v1";
+		function installThemeSyncTransport(theme, form, subscribe) {
+			const key = Symbol.for(THEME_SYNC_TRANSPORT_KEY);
+			const transport = Object.freeze({
+				readPreference() {
+					// ThemeRuntime publishes its default before the saved form arrives.
+					// Keep native chrome on the startup preference until that read completes.
+					const settings = form.getSnapshot();
+					if (settings.status !== "ready" || settings.value === undefined) return undefined;
+					const snapshot = theme.getTheme();
+					return snapshot.preference === "system" ? "system" : snapshot.active.colorScheme;
+				}
+			});
+			Object.defineProperty(window, key, { value: transport, configurable: true });
+			let last;
+			const publish = () => {
+				const preference = transport.readPreference();
+				if (preference === undefined) return;
+				// Include the resolved color so OS changes still notify while the
+				// preference remains "system". Font/token changes need no native update.
+				const value = `${preference}:${theme.getTheme().active.colorScheme}`;
+				if (value === last) return;
+				last = value;
+				if (window.parent !== window) window.parent.postMessage({ type: THEME_SYNC_TRANSPORT_KEY, preference }, "*");
+			};
+			const offTheme = subscribe(publish);
+			const offForm = form.subscribe(publish);
+			publish();
+			return () => {
+				offTheme();
+				offForm();
+				if (window[key] === transport) delete window[key];
+			};
+		}
+		exports.THEME_SYNC_TRANSPORT_KEY = THEME_SYNC_TRANSPORT_KEY;
+		exports.installThemeSyncTransport = installThemeSyncTransport;
 		exports.installPluginManagerTransport = installPluginManagerTransport;
 		exports.name = "desktop-notifications";
 		exports.inject = ["slots", "sessions", "uiSession", "uiConversation", "uiWorkspace", "cordisInspect", "remote", "remote.pluginManager"];
@@ -798,6 +834,9 @@ window.__ModuleLoader__.load({
 			ctx.inject(["theme", "configForms"], (child) => {
 				child.effect(() => installThemeWriteGuard(child.theme, child.configForms.get("ui-theme"),
 					() => child.configForms.describe().load()), "desktop: ordered theme adoption");
+				child.effect(() => installThemeSyncTransport(child.theme, child.configForms.get("ui-theme"),
+					(listener) => child.on("theme/change", listener)),
+					"desktop: ready theme synchronization");
 			});
 			ctx.effect(() => installPluginManagerTransport(ctx.remote), "desktop: official plugin switches");
 			ctx.effect(() => installSessionOpenFeedback(ctx.uiWorkspace, (message) => window.alert(message)), "desktop: session open errors");

@@ -20,6 +20,7 @@ import { AgentPointerIcon } from './AgentPointerIcon.js'
 import { BrowserAddressInput } from './BrowserAddressInput.js'
 
 const EMPTY_STATE: FloatingBrowserWindowState = {
+  panelOpen: false,
   loading: false,
   url: '',
   title: '',
@@ -217,7 +218,8 @@ export function BrowserWindowApp(): React.JSX.Element {
           <button type="button" aria-label="后退" disabled={!state.canGoBack} onClick={() => void invoke('back')}><ArrowLeft aria-hidden="true" /></button>
           <button type="button" aria-label="前进" disabled={!state.canGoForward} onClick={() => void invoke('forward')}><ArrowRight aria-hidden="true" /></button>
           <button type="button" className={state.loading ? 'loading' : ''} aria-label={state.loading ? '停止加载' : '重新加载'} onClick={() => void invoke('reload')}><RotateCw aria-hidden="true" /></button>
-          <BrowserAddressInput className="address" url={state.url} onNavigate={(address) => invoke('navigate', address)} />
+          <BrowserAddressInput className="address" url={state.url} onNavigate={(address) => invoke('navigate', address)} onPageFocus={window.floatingBrowser.onBrowserPageFocus}
+            autoFocusKey={state.panelOpen && !state.url ? state.activeTabId : undefined} />
           <button type="button" aria-label="浏览器设置" onClick={(event) => openMenu('settings', event.currentTarget)}><MoreVertical aria-hidden="true" /></button>
         </div>
         {state.viewport === null ? null : <DeviceToolbar viewport={state.viewport} zoomFactor={state.zoomFactor} />}

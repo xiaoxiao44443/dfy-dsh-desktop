@@ -29,6 +29,12 @@ const bridge: DesktopBridge = {
   getState: () => ipcRenderer.invoke('desktop:get-state') as Promise<DesktopState>,
   windowAction: (action: WindowAction) => ipcRenderer.invoke('desktop:window-action', action) as Promise<void>,
   reportHarnessFrameLoaded: (url: string) => ipcRenderer.invoke('desktop:harness-frame-loaded', url) as Promise<void>,
+  reportHarnessTheme: (preference, loadId) => ipcRenderer.invoke('desktop:harness-theme-changed', preference, loadId) as Promise<void>,
+  onBrowserPageFocus(listener) {
+    const handler = (): void => listener()
+    ipcRenderer.on('desktop-browser:page-focus', handler)
+    return () => ipcRenderer.off('desktop-browser:page-focus', handler)
+  },
   titleMenuAction: (action: TitleMenuAction) => ipcRenderer.invoke('desktop:title-menu-action', action) as Promise<void>,
   checkForHarnessUpdate: () => ipcRenderer.invoke('desktop:check-update') as Promise<void>,
   installHarnessVersion: (version: string) => ipcRenderer.invoke('desktop:install-update-version', version) as Promise<void>,

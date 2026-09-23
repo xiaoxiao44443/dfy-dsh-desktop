@@ -23,6 +23,7 @@ import { filterHarnessRequestCookies } from './harness-request-cookies.js'
 import type { DesktopApprovalDecision, DesktopNotificationApproval } from './desktop-notifications.js'
 import type { PluginActivationOutcome } from '../shared/contracts.js'
 import { parseHarnessThemePreference, readStartupThemePreference, type ColorThemePreference } from './harness-theme.js'
+import { THEME_SYNC_TRANSPORT_KEY } from '../shared/theme-sync.js'
 export { parseHarnessThemePreference } from './harness-theme.js'
 
 const STATE_CHANNEL = 'desktop:state'
@@ -97,6 +98,7 @@ export class WindowController {
   private themeProbeTimer: NodeJS.Timeout | undefined
   private themeProbeInFlight = false
   private themeProbeGeneration = 0
+  private themePreferenceRevision = 0
   private pluginFailureProbeTimer: NodeJS.Timeout | undefined
   private pluginFailureProbeInFlight = false
   private contextMenuSequence = 0
@@ -455,6 +457,14 @@ export class WindowController {
       if (event.sender !== this.window?.webContents) return
       this.handleHarnessFrameLoaded(url)
       void this.detectHarnessPluginFailure()
+    })
+    ipcMain.handle('desktop:harness-theme-changed', (event, value: unknown, loadId: unknown) => {
+      if (event.sender !== this.window?.webContents || event.senderFrame !== this.window?.webContents.mainFrame
+        || this.harnessOrigin === undefined || loadId !== this.harnessLoadId) return
+      const preference = parseHarnessThemePreference(value)
+      if (preference === undefined) return
+      this.themePreferenceRevision += 1
+      this.synchronizeTheme(preference)
     })
     ipcMain.handle('desktop:title-menu-action', (_event, action: TitleMenuAction) => this.titleMenuAction(action))
     ipcMain.handle('desktop:check-update', () => this.runtime.checkForUpdates({ download: false }))
@@ -1340,16 +1350,12 @@ export class WindowController {
       const frame = this.findHarnessFrame()
       if (frame === undefined) return
       this.themeProbeInFlight = true
+      const revision = this.themePreferenceRevision
       try {
         const preference = await this.readConfiguredThemePreference()
-        if (generation !== this.themeProbeGeneration || frame !== this.findHarnessFrame()) return
-        const theme = this.applyThemePreference(preference)
-        if ((theme === 'dark' || theme === 'light') && theme !== this.theme) {
-          this.theme = theme
-          this.browserDevTools.setTheme(theme)
-          this.browser?.setTheme(theme)
-          this.publishState()
-        }
+        if (generation !== this.themeProbeGeneration || frame !== this.findHarnessFrame()
+          || revision !== this.themePreferenceRevision) return
+        this.synchronizeTheme(preference)
       } catch {
         // Navigation may replace the iframe while a probe is running; the next probe retries.
       } finally {
@@ -1362,11 +1368,12 @@ export class WindowController {
 
   private async readConfiguredThemePreference(): Promise<ColorThemePreference> {
     try {
-      // DSH 0.1.7 publishes the resolved Profile preference before rendering,
-      // then keeps this attribute current when the user changes Appearance.
+      // The DOM theme source briefly becomes the default `system` while DSH's
+      // settings load. Mirror the live theme only after the official form is
+      // ready, so it cannot override the saved startup preference in between.
       const frame = this.findHarnessFrame()
       if (frame !== undefined) {
-        const value: unknown = await frame.executeJavaScript('document.documentElement?.getAttribute("data-ds-theme-source")')
+        const value: unknown = await frame.executeJavaScript(`globalThis[Symbol.for(${JSON.stringify(THEME_SYNC_TRANSPORT_KEY)})]?.readPreference?.()`)
         const preference = parseHarnessThemePreference(value)
         if (preference !== undefined) return preference
       }
@@ -1386,6 +1393,15 @@ export class WindowController {
     // before reading its color so a previous explicit override cannot stick.
     if (nativeTheme.themeSource !== preference) nativeTheme.themeSource = preference
     return resolveHarnessThemePreference(preference, nativeTheme.shouldUseDarkColors)
+  }
+
+  private synchronizeTheme(preference: ColorThemePreference): void {
+    const theme = this.applyThemePreference(preference)
+    if (theme === this.theme) return
+    this.theme = theme
+    this.browserDevTools.setTheme(theme)
+    this.browser?.setTheme(theme)
+    this.publishState()
   }
 
   private stopThemeSync(): void {

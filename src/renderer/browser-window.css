@@ -239,6 +239,8 @@ button svg { width: 18px; height: 18px; }
 }
 
 .address {
+  position: relative;
+  isolation: isolate;
   display: flex;
   min-width: 120px;
   height: 35px;
@@ -248,21 +250,44 @@ button svg { width: 18px; height: 18px; }
   padding: 0 12px;
   border: 1px solid transparent;
   border-radius: 18px;
-  background: var(--browser-window-hover);
+  background: transparent;
   box-shadow: 0 0 0 0 transparent;
-  transition: border-color 180ms ease, background-color 180ms ease, box-shadow 180ms ease;
+  transition: border-color 100ms ease-out, box-shadow 100ms ease-out;
+}
+
+.address::before {
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--browser-window-page-background) 90%, transparent);
+  content: '';
+  opacity: 0;
+  transform: scale(.985);
+  transition: opacity 100ms ease-out, background-color 100ms ease-out, transform 100ms cubic-bezier(.2, .8, .2, 1);
+  pointer-events: none;
 }
 
 .address:hover:not(:focus-within) {
   border-color: color-mix(in srgb, var(--browser-window-text) 9%, transparent);
-  background: color-mix(in srgb, var(--browser-window-hover) 120%, transparent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--browser-window-text) 3.5%, transparent);
+}
+
+.address:hover:not(:focus-within)::before {
+  background: var(--browser-window-hover);
+  opacity: 1;
+  transform: scale(1);
 }
 
 .address:focus-within {
   border-color: rgba(72, 119, 237, .5);
-  background: color-mix(in srgb, var(--browser-window-page-background) 90%, transparent);
   box-shadow: 0 0 0 3px rgba(72, 119, 237, .08);
+}
+
+.address:focus-within::before { opacity: 1; transform: scale(1); }
+
+@media (prefers-reduced-motion: reduce) {
+  .address, .address::before { transition: none; }
 }
 
 .address > svg {

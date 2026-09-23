@@ -1,13 +1,8 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { parseDocument } from 'yaml'
-import type { ColorTheme } from '../shared/contracts.js'
-
-export type ColorThemePreference = ColorTheme | 'system'
-
-export function parseHarnessThemePreference(value: unknown): ColorThemePreference | undefined {
-  return value === 'dark' || value === 'light' || value === 'system' ? value : undefined
-}
+import { parseHarnessThemePreference, type ColorThemePreference } from '../shared/theme-sync.js'
+export { parseHarnessThemePreference, type ColorThemePreference } from '../shared/theme-sync.js'
 
 /** Read only the scalar theme override; never evaluate executable YAML tags. */
 function themeOverride(patches: unknown): ColorThemePreference | undefined {

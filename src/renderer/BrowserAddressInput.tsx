@@ -1,5 +1,5 @@
 import { Globe2 } from 'lucide-react'
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import { browserAddressForCopy, browserAddressForNavigation, formatBrowserAddress } from '../shared/browser-address-display.js'
 
@@ -7,10 +7,12 @@ interface BrowserAddressInputProps {
   url: string
   className: string
   onNavigate(address: string): void | Promise<void>
+  onPageFocus(listener: () => void): () => void
+  autoFocusKey?: string
 }
 
 /** Both browser surfaces share the same display, selection and editing behavior. */
-export function BrowserAddressInput({ url, className, onNavigate }: BrowserAddressInputProps): React.JSX.Element {
+export function BrowserAddressInput({ url, className, onNavigate, onPageFocus, autoFocusKey }: BrowserAddressInputProps): React.JSX.Element {
   const [address, setAddress] = useState(() => formatBrowserAddress(url, { hideScheme: true }))
   const inputRef = useRef<HTMLInputElement>(null)
   const focused = useRef(false)
@@ -19,6 +21,33 @@ export function BrowserAddressInput({ url, className, onNavigate }: BrowserAddre
   const edited = useRef(false)
   const composing = useRef(false)
   const selectOnPointerUp = useRef(false)
+
+  const restoreDisplay = useCallback((): void => {
+    focused.current = false
+    focusUrl.current = url
+    compact.current = true
+    edited.current = false
+    composing.current = false
+    selectOnPointerUp.current = false
+    setAddress(formatBrowserAddress(url, { hideScheme: true }))
+    const input = inputRef.current
+    if (input !== null) {
+      input.setSelectionRange(0, 0)
+      input.scrollLeft = 0
+    }
+  }, [url])
+
+  useEffect(() => onPageFocus(() => {
+    // A WebContentsView has its own focus tree, so focusing the page does not
+    // necessarily blur the shell's DOM input or clear its inactive selection.
+    inputRef.current?.blur()
+    restoreDisplay()
+  }), [onPageFocus, restoreDisplay])
+
+  useLayoutEffect(() => {
+    if (autoFocusKey === undefined) return
+    inputRef.current?.focus({ preventScroll: true })
+  }, [autoFocusKey])
 
   useLayoutEffect(() => {
     if (focused.current) return
@@ -62,15 +91,7 @@ export function BrowserAddressInput({ url, className, onNavigate }: BrowserAddre
         focused.current = true
         event.currentTarget.select()
       }}
-      onBlur={() => {
-        focused.current = false
-        focusUrl.current = url
-        compact.current = true
-        edited.current = false
-        composing.current = false
-        selectOnPointerUp.current = false
-        setAddress(formatBrowserAddress(url, { hideScheme: true }))
-      }}
+      onBlur={restoreDisplay}
       onPointerDown={(event) => {
         if (event.button !== 0) return
         if (!focused.current) {

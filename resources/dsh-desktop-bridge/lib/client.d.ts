@@ -67,6 +67,12 @@ export declare function waitForAssistantReply(binding: unknown, baseline: unknow
 export declare function pendingInteractionSummary(binding: unknown, status: 'approval' | 'question' | 'plan-review', interaction?: unknown): string | undefined
 export declare function installSessionNotifications(ctx: Context, send?: (notification: unknown) => Promise<void>): void
 export declare const NOTIFICATION_APPROVAL_TRANSPORT_KEY = 'dsh.desktop.notification-approval.transport.v1'
+export declare const THEME_SYNC_TRANSPORT_KEY = 'dsh.desktop.theme-sync.v1'
+export declare function installThemeSyncTransport(
+  theme: { getTheme(): { preference: string; active: { colorScheme: 'dark' | 'light' } } },
+  form: { getSnapshot(): { status: string; value?: unknown }; subscribe(listener: () => void): () => void },
+  subscribe: (listener: () => void) => () => void,
+): () => void
 export interface DesktopNotificationApproval {
   token: string
   interactionKey: string

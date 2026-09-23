@@ -112,3 +112,76 @@ describe('official theme preference writes', () => {
     } finally { await f.dispose() }
   })
 })
+
+describe('native theme synchronization during startup', () => {
+  it.each(['dark', 'light'])('waits for the saved %s preference and still follows later user changes', async (savedPreference) => {
+    const description = Promise.withResolvers<unknown>()
+    let preference = savedPreference
+    let revision = 0
+    const row = () => ({ ns: 'ui-theme', revision: String(revision), base: {}, user: { preference },
+      value: { preference, fontSize: 14 }, schema })
+    const mutate = vi.fn(async (_namespace: string, ops: Array<{ value: string }>) => {
+      preference = ops[0]!.value
+      revision++
+      return { ok: true, value: row() }
+    })
+    const client = await createThemeClient(packagePath, {
+      describe: () => description.promise, mutate,
+    }, { initialize: false })
+    const dispose = client.sync()
+    try {
+      expect(client.theme.getTheme().preference).toBe('system')
+      expect(client.readPreference()).toBeUndefined()
+      expect(client.messages).toEqual([])
+      const loading = client.refresh()
+      await tick()
+      expect(client.readPreference()).toBeUndefined()
+      expect(mutate).not.toHaveBeenCalled()
+      description.resolve({ ok: true, value: { writable: true, namespaces: [row()] } })
+      await loading
+      expect(client.readPreference()).toBe(savedPreference)
+      expect(client.messages.map((message: { preference: string }) => message.preference)).toEqual([savedPreference])
+      // A real user choice after startup must not be held at the saved color.
+      client.theme.setTheme('system')
+      expect(client.readPreference()).toBe('system')
+      expect(client.messages.at(-1)?.preference).toBe('system')
+      await tick()
+      expect(mutate).toHaveBeenCalledOnce()
+      dispose()
+      expect(client.readPreference()).toBeUndefined()
+    } finally {
+      dispose()
+      description.resolve({ ok: true, value: { writable: true, namespaces: [row()] } })
+      await client.dispose()
+    }
+  })
+
+  it('pushes manual changes immediately, ignores stale saves and unsubscribes on disposal', async () => {
+    const f = await fixture()
+    const dispose = f.sync()
+    const preferences = () => f.messages.map((message: { preference: string }) => message.preference)
+    try {
+      expect(preferences()).toEqual(['light'])
+      f.theme.setTheme('dark')
+      f.theme.setTheme('light')
+      f.theme.setTheme('dark')
+      // No timer or settings round trip is needed for the title bar notification.
+      expect(preferences()).toEqual(['light', 'dark', 'light', 'dark'])
+      await tick()
+      await f.external('light')
+      await f.accept()
+      await f.accept()
+      await f.accept()
+      expect(preferences()).toEqual(['light', 'dark', 'light', 'dark'])
+      f.theme.setFontSize(15)
+      await tick()
+      await f.accept()
+      expect(preferences()).toHaveLength(4)
+      dispose()
+      f.theme.setTheme('system')
+      await tick()
+      await f.accept()
+      expect(preferences()).toHaveLength(4)
+    } finally { dispose(); await f.dispose() }
+  })
+})

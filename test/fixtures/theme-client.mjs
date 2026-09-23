@@ -5,7 +5,7 @@ import { runInNewContext } from 'node:vm';
 
 // Actual published settings mirror/write queue and ThemeRuntime. The simulated
 // Remote lets tests deliver document invalidations between queued writes.
-export async function createThemeClient(dshPackagePath, settings) {
+export async function createThemeClient(dshPackagePath, settings, { initialize = true } = {}) {
   const require = createRequire(realpathSync(dshPackagePath));
   const cordis = await import(pathToFileURL(require.resolve('@deepseek-ai/cordis')));
   // Observable storage only: the published store's Zustand/Immer engine is
@@ -20,7 +20,9 @@ export async function createThemeClient(dshPackagePath, settings) {
     };
   } };
   let factory;
-  const window = { __ModuleLoader__: { load(entry) { factory = entry.factory; } } };
+  const messages = [];
+  const window = { __ModuleLoader__: { load(entry) { factory = entry.factory; } },
+    parent: { postMessage(message) { messages.push(message); } } };
   const load = file => {
     runInNewContext(readFileSync(file, 'utf8'), { window, structuredClone });
     return factory(name => {
@@ -40,10 +42,13 @@ export async function createThemeClient(dshPackagePath, settings) {
   const form = forms.get('ui-theme');
   const theme = new themeClient.ThemeRuntime(ctx, form);
   const fixture = { theme, form, refresh: () => forms.describe().load() };
-  await fixture.refresh();
+  if (initialize) await fixture.refresh();
   return {
     ...fixture,
     guard: () => bridge.installThemeWriteGuard(fixture.theme, fixture.form, fixture.refresh),
+    sync: () => bridge.installThemeSyncTransport(fixture.theme, fixture.form, fn => ctx.on('theme/change', fn)),
+    messages,
+    readPreference: () => window[Symbol.for(bridge.THEME_SYNC_TRANSPORT_KEY)]?.readPreference(),
     onChange: fn => ctx.on('theme/change', fn),
     dispose: () => ctx.fiber.dispose(),
   };

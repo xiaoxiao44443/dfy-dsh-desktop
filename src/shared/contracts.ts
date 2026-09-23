@@ -135,13 +135,21 @@ export interface PluginMutationResult {
   restartRequired?: boolean
 }
 
+/** A plugin's unsatisfied DSH peer requirements, reported by rc.1 and later. */
+export interface PluginCompatibilityIssue {
+  name: string
+  version: string
+  runtimeVersion: string
+  peers: Record<string, string>
+}
+
 /** Public outcome of DSH pluginManager.setBundleEnabled. */
 export interface PluginActivationOutcome {
   changed: boolean
   application: 'applied' | 'restart-required' | 'overridden' | 'failed' | 'cancelled'
   target: string
   enabled?: boolean
-  error?: { code: string; diagnostic?: string }
+  error?: { code: string; diagnostic?: string; incompatible?: PluginCompatibilityIssue[] }
   warnings?: string[]
 }
 
@@ -156,6 +164,10 @@ export interface PluginRecoveryEntry {
 export interface PluginInitializationFailure extends PluginRecoveryEntry {
   detail: string
   recoverable: boolean
+  /** DSH has already denied this target before loading it. */
+  blockedByCompatibility?: boolean
+  scope?: 'bundle'
+  incompatibility?: PluginCompatibilityIssue
 }
 
 export type BrowserAgentOpenMode = 'background' | 'visible'
@@ -238,6 +250,7 @@ export interface DesktopBrowserHistoryEntry {
 }
 
 export interface FloatingBrowserWindowState {
+  panelOpen: boolean
   loading: boolean
   url: string
   title: string
@@ -255,6 +268,7 @@ export interface FloatingBrowserWindowState {
 export interface FloatingBrowserWindowBridge {
   invoke<T = void>(action: string, value?: unknown): Promise<T>
   onState(listener: (state: FloatingBrowserWindowState) => void): () => void
+  onBrowserPageFocus(listener: () => void): () => void
 }
 
 export type BrowserMenuWindowKind = BrowserMenuKind | 'context'
@@ -308,6 +322,8 @@ export interface DesktopBridge {
   getState(): Promise<DesktopState>
   windowAction(action: WindowAction): Promise<void>
   reportHarnessFrameLoaded(url: string): Promise<void>
+  reportHarnessTheme(preference: ColorTheme | 'system', loadId: number): Promise<void>
+  onBrowserPageFocus(listener: () => void): () => void
   titleMenuAction(action: TitleMenuAction): Promise<void>
   checkForHarnessUpdate(): Promise<void>
   installHarnessVersion(version: string): Promise<void>

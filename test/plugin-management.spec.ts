@@ -292,6 +292,34 @@ describe('PluginManagementService', () => {
     expect(result.exitCode).toBe(application === 'failed' ? 1 : 0)
     expect(result.output).toContain(application === 'failed' ? 'activation failed' : application === 'overridden' ? '覆盖' : '重启')
   })
+
+  it('explains every rc.1 incompatible component without enabling the bundle or granting exemptions', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-incompatible-switch-'))
+    roots.push(root)
+    const profile = join(root, 'profiles/web')
+    const packageDir = join(profile, 'node_modules/demo')
+    await mkdir(packageDir, { recursive: true })
+    await writeFile(join(packageDir, 'package.json'), JSON.stringify({ name: 'demo', version: '1.0.0', dsh: { bundle: { patch: './cordis.patch.yml' } } }))
+    const manifest = JSON.stringify({ dependencies: { demo: '1' }, dsh: { profile: { bundles: [] } } })
+    await writeFile(join(profile, 'package.json'), manifest)
+    const runPnpm = vi.fn()
+    const service = new PluginManagementService(root, { getWindow: () => undefined, runPnpm,
+      setBundleEnabled: async () => ({ changed: false, target: 'demo', application: 'failed', error: {
+        code: 'incompatible-version', incompatible: [
+          { name: 'first', version: '1.0.0', runtimeVersion: '0.1.7-rc.1', peers: { '@deepseek-ai/dsh': '<0.1.7' } },
+          { name: 'second', version: '2.0.0', runtimeVersion: '0.1.7-rc.1', peers: { '@deepseek-ai/dsh-client-ui-tool': '>=0.2' } },
+        ],
+      } }),
+    })
+    const result = await service.setActive({ profile: 'web', packageName: 'demo', active: true })
+    expect(result.exitCode).toBe(1)
+    expect(result.output).toContain('插件版本校验未通过')
+    expect(result.output).toContain('first@1.0.0 与当前 DSH 0.1.7-rc.1 不兼容')
+    expect(result.output).toContain('second@2.0.0')
+    expect(result.output).toContain('@deepseek-ai/dsh-client-ui-tool >=0.2')
+    expect(await readFile(join(profile, 'package.json'), 'utf8')).toBe(manifest)
+    expect(runPnpm).not.toHaveBeenCalled()
+  })
 })
 
 describe('classifyPluginSource', () => {

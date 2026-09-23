@@ -22,6 +22,7 @@ import type {
 import type { HarnessCommandResult } from './harness-process.js'
 import { migrateLegacyPluginState } from './profile-upgrade.js'
 import type { PluginActivationOutcome } from '../shared/contracts.js'
+import { describePluginCompatibility } from '../shared/plugin-compatibility.js'
 
 const PACKAGE_NAME_PATTERN = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/iu
 
@@ -475,11 +476,15 @@ async function readMetadataFile(path: string, readMembers = true): Promise<Packa
 
 function activationMessage(name: string, enabled: boolean, result: PluginActivationOutcome): string {
   const action = enabled ? '启用' : '停用'
+  const error = result.error?.code === 'incompatible-version'
+    ? ['插件版本校验未通过。', ...(result.error.incompatible ?? []).map(describePluginCompatibility),
+      '请更新相关插件或使用兼容的 DSH 版本后重试。'].join('\n')
+    : result.error?.diagnostic ?? result.error?.code ?? '未知错误'
   const messages = {
     applied: `已${action}“${name}”，已通过 DSH 官方插件管理器生效。`,
     'restart-required': `已保存“${name}”的${action}状态；此 Profile 未启用热更新，需要重启。`,
     overridden: `已保存“${name}”的${action}状态，但被更高优先级的配置覆盖。`,
-    failed: `DSH 未能${action}“${name}”：${result.error?.diagnostic ?? result.error?.code ?? '未知错误'}`,
+    failed: `DSH 未能${action}“${name}”：${error}`,
     cancelled: `“${name}”的${action}操作已取消。`,
   }
   return [messages[result.application], ...(result.warnings ?? [])].join('\n')

@@ -371,6 +371,7 @@ export class DesktopBrowserService extends EventEmitter {
     await this.applyViewport()
     this.setNativeVisible(true)
     this.changed()
+    this.focusBlankAddress()
   }
 
   async closeTab(tabId: string, hideBrowserWhenLast = false): Promise<void> {
@@ -564,6 +565,16 @@ export class DesktopBrowserService extends EventEmitter {
       await this.applyViewport()
     }
     this.changed()
+    if (open) this.focusBlankAddress()
+  }
+
+  private focusBlankAddress(): void {
+    if (!this.panelOpen || this.activeTab()?.url !== '') return
+    const host = this.viewHostWindow
+    if (host === undefined || host.isDestroyed() || host.webContents.isDestroyed()) return
+    // Return native keyboard focus from the page view to the address input's
+    // renderer. The mounted input focuses itself when the blank tab is shown.
+    host.webContents.focus()
   }
 
   async setViewBounds(value: DesktopBrowserViewBounds | null): Promise<void> {
@@ -1655,6 +1666,7 @@ export class DesktopBrowserService extends EventEmitter {
     if (floating === undefined || floating.isDestroyed() || floating.webContents.isLoadingMainFrame()) return
     const state = this.state
     floating.webContents.send(FLOATING_STATE_CHANNEL, {
+      panelOpen: state.panelOpen,
       loading: state.loading,
       url: state.url,
       title: state.title,
@@ -1812,6 +1824,13 @@ export class DesktopBrowserService extends EventEmitter {
     view.setVisible(false)
     window.contentView.addChildView(view)
     const contents = view.webContents
+    const reportPageFocus = (): void => {
+      if (this.activeTabId !== tab.id || this.view !== view || !view.getVisible()) return
+      const host = this.viewHostWindow
+      if (host === undefined || host.isDestroyed() || host.webContents.isDestroyed()) return
+      host.webContents.send('desktop-browser:page-focus')
+    }
+    contents.on('focus', reportPageFocus)
     installImageContextCapture(contents)
     contents.setZoomFactor(this.zoomFactor)
     contents.backgroundThrottling = false
@@ -1829,6 +1848,7 @@ export class DesktopBrowserService extends EventEmitter {
     })
     contents.on('before-mouse-event', (_event, input) => {
       if (input.type !== 'mouseDown') return
+      reportPageFocus()
       const requestId = this.closeMenu()
       this.emit('menu-interaction')
       if (requestId !== undefined) this.emit('context-menu-dismiss', requestId, false)

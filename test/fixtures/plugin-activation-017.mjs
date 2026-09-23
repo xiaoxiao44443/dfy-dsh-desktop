@@ -10,7 +10,7 @@ import { createDesktopPluginClient } from './desktop-plugin-client.mjs';
 
 const require = createRequire(realpathSync(resolve(process.argv[2])));
 const load = name => import(pathToFileURL(require.resolve(name)));
-const { boot, initProfile, loadProfileDirectory, readProfilePatches, readProfileManifest } = await load('@deepseek-ai/dsh-app-boot');
+const { boot, initProfile, loadProfileDirectory, readProfilePatches, readProfileManifest, prepareProfileEntries } = await load('@deepseek-ai/dsh-app-boot');
 const { default: PluginManager } = await load('@deepseek-ai/dsh-plugin-manager');
 const { default: Hmr } = await load('@deepseek-ai/dsh-hmr');
 const { default: Timer } = await load('@deepseek-ai/cordis-plugin-timer');
@@ -75,6 +75,44 @@ for (const live of [false, true]) {
       assert.equal(ctx.managedProbe, true);
     }
     assert.equal((await bridge.setBundleEnabled('core', false)).error.code, 'management-required');
+
+    // rc.1: typed refusals retain every incompatible peer through the Client
+    // Gateway. Both activation and boot must refuse before importing code.
+    const incompatibleDir = join(dir, 'node_modules', 'incompatible');
+    mkdirSync(incompatibleDir, { recursive: true });
+    writeFileSync(join(incompatibleDir, 'package.json'), JSON.stringify({
+      name: 'incompatible', version: '1.0.0',
+      peerDependencies: { '@deepseek-ai/dsh': '>=99.0.0' },
+      dsh: { bundle: { patch: './cordis.patch.yml' } },
+    }));
+    writeFileSync(join(incompatibleDir, 'cordis.patch.yml'), JSON.stringify([{ insert: [{ id: 'blocked', name: './plugin.mjs' }] }]));
+    writeFileSync(join(incompatibleDir, 'plugin.mjs'), 'throw new Error("Incompatible plugin must never execute")');
+    const before = readProfileManifest('test', dir);
+    before.dependencies.incompatible = '1.0.0';
+    writeFileSync(join(dir, 'package.json'), JSON.stringify(before));
+    const refusal = await bridge.setBundleEnabled('incompatible', true);
+    assert.equal(refusal.application, 'failed');
+    assert.equal(refusal.error.code, 'incompatible-version');
+    assert.equal(refusal.changed, false);
+    assert.deepEqual(refusal.error.incompatible[0].peers, { '@deepseek-ai/dsh': '>=99.0.0' });
+    assert.equal(refusal.error.incompatible[0].name, 'incompatible');
+    assert.deepEqual(readProfileManifest('test', dir), before);
+    const stderr = process.stderr.write;
+    const diagnostics = [];
+    try {
+      process.stderr.write = chunk => { diagnostics.push(String(chunk)); return true; };
+      const rows = prepareProfileEntries(ctx, [{ id: 'blocked', name: pathToFileURL(join(incompatibleDir, 'plugin.mjs')).href }], pathToFileURL(join(dir, 'cordis.yml')).href);
+      assert.equal(rows[0].disabled, true);
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ ...before, dsh: { profile: { bundles: [...before.dsh.profile.bundles, 'incompatible'] } } }));
+      const loaded = loadProfileDirectory('dsh', dir, anchor);
+      assert.ok(!loaded.layers.some(layer => layer.packageName === 'incompatible'));
+      assert.match(diagnostics.join(''), /dsh: disabling profile plugin row "blocked": Plugin incompatible@1.0.0 is incompatible/);
+      assert.match(diagnostics.join(''), /dsh: skipping profile bundle "incompatible": Error: Plugin incompatible@1.0.0 is incompatible/);
+    } finally {
+      process.stderr.write = stderr;
+      writeFileSync(join(dir, 'package.json'), JSON.stringify(before));
+    }
+    console.log(`PASS rc.1 typed compatibility refusal, row preflight and bundle skip (HMR ${live})`);
     await client.dispose();
     assert.equal(client.window[Symbol.for('dsh.desktop.plugin-manager.transport.v1')], undefined);
     console.log(`PASS official Client Gateway bundle switches, dependency preservation and bridge lifecycle (HMR ${live})`);

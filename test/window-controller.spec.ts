@@ -738,7 +738,9 @@ describe('configured native theme synchronization', () => {
       const controller = new WindowController(runtime as never, development as never)
       await controller.create()
       expect(electronMocks.nativeTheme.source).toBe('light')
-      expect(electronMocks.window!.options.backgroundColor).toBe('#f4f5f7')
+      // Windows keeps an acrylic window; the saved theme still controls the
+      // native controls and the renderer's first paint.
+      expect(electronMocks.window!.options.backgroundColor).toBe(process.platform === 'win32' ? '#00FFFFFF' : '#f4f5f7')
       expect(electronMocks.window!.loadFile).toHaveBeenCalledWith(expect.any(String), {
         query: expect.objectContaining({ theme: 'light' }),
       })
@@ -748,7 +750,7 @@ describe('configured native theme synchronization', () => {
   function fixture() {
     const runtime = Object.assign(new EventEmitter(), { harnessHome: '/unused-theme-test', updateState: { status: 'idle' } })
     const development = Object.assign(new EventEmitter(), { state: {} })
-    const browser = Object.assign(new EventEmitter(), { setTheme: vi.fn(), state: { settings: { enabled: true } } })
+    const browser = Object.assign(new EventEmitter(), { setTheme: vi.fn(), attachWindow: vi.fn(), state: { settings: { enabled: true } } })
     const controller = new WindowController(runtime as never, development as never, undefined, browser as never)
     const access = controller as unknown as {
       readConfiguredThemePreference(): Promise<'dark' | 'light' | 'system'>
@@ -756,18 +758,20 @@ describe('configured native theme synchronization', () => {
       findHarnessFrame(): unknown
       startThemeSync(): void
       stopThemeSync(): void
+      harnessOrigin: string | undefined
+      harnessLoadId: number
     }
     const preference = vi.spyOn(access, 'readConfiguredThemePreference').mockResolvedValue('system')
-    return { access, preference, browser }
+    return { controller, access, preference, browser }
   }
 
-  it('reads the live Harness frame instead of the retired settings document', async () => {
+  it('reads the ready theme service from the live Harness frame', async () => {
     const { access, preference } = fixture()
     preference.mockRestore()
     const executeJavaScript = vi.fn().mockResolvedValue('light')
     vi.spyOn(access, 'findHarnessFrame').mockReturnValue({ executeJavaScript })
     await expect(access.readConfiguredTheme()).resolves.toBe('light')
-    expect(executeJavaScript).toHaveBeenCalledWith('document.documentElement?.getAttribute("data-ds-theme-source")')
+    expect(executeJavaScript).toHaveBeenCalledWith('globalThis[Symbol.for("dsh.desktop.theme-sync.v1")]?.readPreference?.()')
     expect(electronMocks.nativeTheme.source).toBe('light')
     executeJavaScript.mockResolvedValue('dark')
     await expect(access.readConfiguredTheme()).resolves.toBe('dark')
@@ -866,6 +870,59 @@ describe('configured native theme synchronization', () => {
       expect(electronMocks.nativeTheme.source).toBe('light')
       expect(electronMocks.nativeTheme.assignments).toEqual(['light'])
       expect(browser.setTheme).toHaveBeenCalledExactlyOnceWith('light')
+    } finally {
+      access.stopThemeSync()
+      frame.mockRestore()
+      schedule.mockRestore()
+      unschedule.mockRestore()
+    }
+  })
+
+  it('applies live theme messages immediately and rejects stale frames or invalid values', async () => {
+    const { controller, access, browser } = fixture()
+    await controller.create()
+    access.harnessOrigin = 'http://127.0.0.1:45678'
+    access.harnessLoadId = 7
+    const contents = electronMocks.window!.webContents
+    const event = { sender: contents, senderFrame: contents.mainFrame }
+    const report = electronMocks.ipcHandlers.get('desktop:harness-theme-changed')!
+    report(event, 'light', 7)
+    expect(electronMocks.nativeTheme.source).toBe('light')
+    expect(browser.setTheme).toHaveBeenLastCalledWith('light')
+    expect(contents.send).toHaveBeenLastCalledWith('desktop:state', expect.objectContaining({ theme: 'light' }))
+    report(event, 'dark', 7)
+    expect(electronMocks.nativeTheme.source).toBe('dark')
+    report(event, 'system', 7)
+    expect(electronMocks.nativeTheme.source).toBe('system')
+    const assignments = [...electronMocks.nativeTheme.assignments]
+    report(event, 'light', 6)
+    report({ ...event, sender: {} }, 'light', 7)
+    report({ ...event, senderFrame: {} }, 'light', 7)
+    report(event, 'auto', 7)
+    access.harnessOrigin = undefined
+    report(event, 'light', 7)
+    expect(electronMocks.nativeTheme.assignments).toEqual(assignments)
+  })
+
+  it('does not let a pending poll overwrite a more recent live theme notification', async () => {
+    const { controller, access, preference } = fixture()
+    await controller.create()
+    access.harnessOrigin = 'http://127.0.0.1:45678'
+    access.harnessLoadId = 7
+    const pending = Promise.withResolvers<'light' | 'dark' | 'system'>()
+    preference.mockReturnValueOnce(pending.promise)
+    const frame = vi.spyOn(access, 'findHarnessFrame').mockReturnValue({})
+    const schedule = vi.spyOn(globalThis, 'setInterval').mockReturnValue(0 as never)
+    const unschedule = vi.spyOn(globalThis, 'clearInterval').mockImplementation(() => undefined)
+    try {
+      access.startThemeSync()
+      const contents = electronMocks.window!.webContents
+      electronMocks.ipcHandlers.get('desktop:harness-theme-changed')!(
+        { sender: contents, senderFrame: contents.mainFrame }, 'dark', 7,
+      )
+      pending.resolve('light')
+      await pending.promise
+      expect(electronMocks.nativeTheme.source).toBe('dark')
     } finally {
       access.stopThemeSync()
       frame.mockRestore()

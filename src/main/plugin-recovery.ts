@@ -1,7 +1,8 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { describePluginEntries, type PluginDiagnosticContext } from './plugin-diagnostics.js'
-import type { PluginInitializationFailure, PluginRecoveryEntry } from '../shared/contracts.js'
+import type { PluginCompatibilityIssue, PluginInitializationFailure, PluginRecoveryEntry } from '../shared/contracts.js'
+import { describePluginCompatibility } from '../shared/plugin-compatibility.js'
 
 const PLUGIN_FAILURE_PATTERN = /failed to (?:import|apply|dispose|rollback) loader entry\s+([^\s(]+)\s+\(([^)\r\n]+)\):\s*([^\r\n]+)/giu
 // DSH 0.1.7 reports inactive entries as one row followed by its stack trace.
@@ -31,13 +32,13 @@ export function parsePluginInitializationFailure(output: string): PluginInitiali
 /** Keep individual causes; pending dependants are not themselves failed plugins. */
 export function parsePluginInitializationFailures(output: string): PluginInitializationFailure[] {
   const text = output.replaceAll(/\u001b\[[0-9;]*m/gu, '').replaceAll('\r\n', '\n')
-  const matches: Array<{ index: number; entryId: string; pluginName: string; detail: string }> = []
+  const matches: Array<PluginInitializationFailure & { index: number }> = []
   const add = (match: RegExpExecArray, offset = 0): void => {
     const entryId = match[1]?.trim()
     const pluginName = match[2]?.trim()
     const detail = match[3]?.trim()
     if (!isSafeValue(entryId) || !isSafeValue(pluginName) || !detail || detail.startsWith('pending ')) return
-    matches.push({ index: (match.index ?? 0) + offset, entryId, pluginName, detail: detail.slice(0, 4_000) })
+    matches.push({ index: (match.index ?? 0) + offset, entryId, pluginName, detail: detail.slice(0, 4_000), recoverable: canRecover(entryId, pluginName) })
   }
   for (const match of text.matchAll(PLUGIN_FAILURE_PATTERN)) add(match)
   // Only parse rows inside the startup warning; ordinary page text/tool output
@@ -58,13 +59,47 @@ export function parsePluginInitializationFailures(output: string): PluginInitial
       add(match, group.index)
     }
   }
+  // rc.1 refuses incompatible rows before Loader and skips incompatible bundles
+  // before composition. They are already blocked; never write a recovery patch
+  // using a bundle name (or an id-less row label) as a Loader entry id.
+  for (const match of text.matchAll(/^dsh: (?:disabling profile plugin (row "(?:[^"\\]|\\.)*"|.+?)|skipping profile bundle ("(?:[^"\\]|\\.)*")): ([^\n]+)/gmu)) {
+    const bundle = match[2] !== undefined
+    const reason = match[3] ?? ''
+    const incompatibility = parseCompatibilityWarning(reason)
+    if (bundle && incompatibility === undefined) continue
+    let entryId = (match[1] ?? match[2] ?? '').replace(/^row /u, '')
+    if (entryId.startsWith('"')) {
+      try { entryId = JSON.parse(entryId) as string } catch { continue }
+    }
+    const pluginName = incompatibility?.name ?? entryId
+    if (!isSafeValue(entryId) || !isSafeValue(pluginName)) continue
+    matches.push({
+      index: match.index, entryId, pluginName, recoverable: false, blockedByCompatibility: true,
+      ...(bundle ? { scope: 'bundle' as const, bundleName: entryId } : {}),
+      ...(incompatibility === undefined ? {} : { incompatibility }),
+      detail: incompatibility === undefined ? `插件兼容性校验未通过。\n${reason.slice(0, 4_000)}`
+        : `${describePluginCompatibility(incompatibility)}\n${reason.slice(0, 4_000)}`,
+    })
+  }
   const failures = new Map<string, PluginInitializationFailure>()
-  for (const { entryId, pluginName, detail } of matches.sort((a, b) => a.index - b.index)) {
+  for (const { index: _index, ...failure } of matches.sort((a, b) => a.index - b.index)) {
+    const { entryId, pluginName, detail } = failure
     // A phase-only summary must not replace an earlier, more useful cause.
     if (/^failed to (?:import|apply|dispose|rollback)$/u.test(detail) && failures.has(`${entryId}\0${pluginName}`)) continue
-    failures.set(`${entryId}\0${pluginName}`, { entryId, pluginName, detail, recoverable: canRecover(entryId, pluginName) })
+    failures.set(`${entryId}\0${pluginName}`, failure)
   }
   return [...failures.values()]
+}
+
+function parseCompatibilityWarning(reason: string): PluginCompatibilityIssue | undefined {
+  const match = /^(?:Error: )?Plugin (\S+)@(\S+) is incompatible with dsh (\S+): peerDependencies (\{.*?\})\./u.exec(reason)
+  if (!match) return undefined
+  try {
+    const peers: unknown = JSON.parse(match[4]!)
+    if (peers === null || typeof peers !== 'object' || Array.isArray(peers)
+      || Object.values(peers).some((value) => typeof value !== 'string')) return undefined
+    return { name: match[1]!, version: match[2]!, runtimeVersion: match[3]!, peers: peers as Record<string, string> }
+  } catch { return undefined }
 }
 
 function canRecover(entryId: string, pluginName: string): boolean {
@@ -106,7 +141,7 @@ export class PluginRecoveryService {
   }
 
   async disableMany(failures: PluginInitializationFailure[]): Promise<void> {
-    if (failures.length === 0 || failures.some((failure) => !failure.recoverable || !isSafeValue(failure.entryId) || !isSafeValue(failure.pluginName) || !canRecover(failure.entryId, failure.pluginName))) {
+    if (failures.length === 0 || failures.some((failure) => failure.blockedByCompatibility || !failure.recoverable || !isSafeValue(failure.entryId) || !isSafeValue(failure.pluginName) || !canRecover(failure.entryId, failure.pluginName))) {
       throw new Error('该插件不能通过桌面恢复层禁用。')
     }
     const next = new Map(this.recovered.map((entry) => [entry.entryId, entry]))

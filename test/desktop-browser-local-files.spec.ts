@@ -39,6 +39,7 @@ vi.mock('electron', async () => {
   }
   class MockView {
     readonly webContents = new MockContents()
+    getVisible = vi.fn(() => false)
     setBounds = vi.fn()
     setVisible = vi.fn()
     constructor(readonly options: unknown) {}
@@ -79,6 +80,11 @@ interface MockBrowserContents extends EventEmitter {
 
 interface BrowserTestAccess {
   window: unknown
+  view: unknown
+  viewHostWindow: unknown
+  activeTabId: string | undefined
+  panelOpen: boolean
+  focusBlankAddress(): void
   createTab(id: string): Promise<BrowserTabRuntime>
   navigateTab(tab: BrowserTabRuntime, url: string, allowSearch: boolean): Promise<unknown>
   openChildTab(parent: BrowserTabRuntime, url: string): Promise<void>
@@ -112,6 +118,41 @@ async function createBrowser(): Promise<{
   const tab = await access.createTab('manual')
   return { service, access, tab, directory, contents: tab.view.webContents as unknown as MockBrowserContents }
 }
+
+describe('native browser focus routing', () => {
+  it('notifies only the visible active page owner when the page receives focus', async () => {
+    const { access, tab, contents } = await createBrowser()
+    const send = vi.fn()
+    access.viewHostWindow = { isDestroyed: () => false, webContents: { isDestroyed: () => false, send } }
+    access.view = tab.view
+    access.activeTabId = tab.id
+    contents.emit('focus')
+    expect(send).not.toHaveBeenCalled()
+    vi.mocked(tab.view.getVisible).mockReturnValue(true)
+    contents.emit('focus')
+    expect(send).toHaveBeenCalledExactlyOnceWith('desktop-browser:page-focus')
+    send.mockClear()
+    access.activeTabId = 'background-tab'
+    contents.emit('focus')
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('returns keyboard focus to the chrome only for an open blank tab', async () => {
+    const { access, tab } = await createBrowser()
+    const focus = vi.fn()
+    access.viewHostWindow = { isDestroyed: () => false, webContents: { isDestroyed: () => false, focus } }
+    access.activeTabId = tab.id
+    access.panelOpen = false
+    access.focusBlankAddress()
+    expect(focus).not.toHaveBeenCalled()
+    access.panelOpen = true
+    access.focusBlankAddress()
+    expect(focus).toHaveBeenCalledOnce()
+    tab.url = 'https://example.com/'
+    access.focusBlankAddress()
+    expect(focus).toHaveBeenCalledOnce()
+  })
+})
 
 describe('local HTML browser addresses', () => {
   it('encodes native absolute paths while preserving literal Chinese, spaces, hashes and percent signs', () => {

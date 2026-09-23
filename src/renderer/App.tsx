@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom'
 import type { BrowserDisplayMode, DesktopApplicationMenuAction, DesktopBrowserHistoryEntry, DesktopBrowserShellSnapshot, DesktopBrowserViewport, DesktopState, DevelopmentState, DfyPluginCatalog as DfyCatalog, ManagedPluginEntry, PluginInventory, PluginMutationResult, PluginRecoveryEntry, PluginSourceType } from '../shared/contracts.js'
 import type { ContextMenuEntry, DesktopContextMenuRequest } from '../shared/context-menu.js'
 import { gitRepositoryWebUrl } from '../shared/plugin-source.js'
+import { readHarnessThemeMessage } from '../shared/theme-sync.js'
 import { BrowserAddressInput } from './BrowserAddressInput.js'
 import { AgentPointerIcon } from './AgentPointerIcon.js'
 import { ContextMenu } from './ContextMenu.js'
@@ -974,12 +975,26 @@ export function App(): ReactNode {
     }
   }), [])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (state === undefined) return
     document.documentElement.dataset.theme = state.theme
     document.documentElement.dataset.platform = state.platform
     document.body.classList.toggle('maximized', state.isMaximized)
   }, [state])
+
+  useEffect(() => {
+    const url = state?.harnessUrl
+    const loadId = state?.harnessLoadId
+    if (url === undefined || loadId === undefined) return
+    const onTheme = (event: MessageEvent): void => {
+      const preference = readHarnessThemeMessage(event, harnessFrame.current?.contentWindow, url)
+      if (preference !== undefined) void desktopApi.reportHarnessTheme(preference, loadId).catch(() => {
+        // The window may be restarting. The readiness probe retries synchronization.
+      })
+    }
+    window.addEventListener('message', onTheme)
+    return () => window.removeEventListener('message', onTheme)
+  }, [state?.harnessUrl, state?.harnessLoadId])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -1524,7 +1539,8 @@ export function App(): ReactNode {
                 <button type="button" aria-label="前进" disabled={!state?.browser.canGoForward} onClick={() => void desktopApi.browserNavigationAction('forward')}><ArrowRight /></button>
                 <button type="button" aria-label={state?.browser.loading ? '停止加载' : '重新加载'} onClick={() => void desktopApi.browserNavigationAction(state?.browser.loading ? 'stop' : 'reload')}><RotateCw className={state?.browser.loading ? 'browser-loading' : ''} /></button>
               </div>
-              <BrowserAddressInput className="browser-address" url={panelBrowser?.url ?? ''} onNavigate={navigateBrowser} />
+              <BrowserAddressInput className="browser-address" url={panelBrowser?.url ?? ''} onNavigate={navigateBrowser} onPageFocus={desktopApi.onBrowserPageFocus}
+                autoFocusKey={browserPanelOpen && !panelBrowser?.url ? panelBrowser?.activeTabId : undefined} />
               <div className="browser-actions">
                 <button type="button" data-browser-menu-trigger aria-label="浏览器设置" aria-expanded={browserSettingsMenuOpen} onClick={(event) => openBrowserMenu('settings', event.currentTarget)}><MoreVertical /></button>
               </div>
