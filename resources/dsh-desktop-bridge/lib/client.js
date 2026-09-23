@@ -734,6 +734,53 @@ window.__ModuleLoader__.load({
 			Object.defineProperty(window, key, { value: transport, configurable: true });
 			return () => { if (window[key] === transport) delete window[key]; };
 		}
+		// DSH 0.1.7 serializes form writes, but describe invalidations can still
+		// publish an older preference while a newer click is queued. Hold ThemeRuntime
+		// adoption until its latest preference write settles; keep the official queue,
+		// revisions and failure recovery as the authority. No extra preference writes.
+		function installThemeWriteGuard(theme, form, refresh) {
+			if (typeof theme.adopt !== "function") return () => {};
+			const originalAdopt = theme.adopt;
+			const originalSet = form.set;
+			let generation = 0;
+			let pending = false;
+			let disposed = false;
+			const adopt = function () {
+				if (!pending) return originalAdopt.call(this);
+			};
+			const set = function (field, value) {
+				// A font-size change can supersede the preference's mirror settlement
+				// in the same form queue; wait for that successor as well.
+				if (field !== "preference" && !pending) return originalSet.call(this, field, value);
+				const current = ++generation;
+				pending = true;
+				const settle = () => {
+					if (disposed || current !== generation) return;
+					pending = false;
+					originalAdopt.call(theme);
+				};
+				return Promise.resolve().then(() => originalSet.call(this, field, value)).then((accepted) => {
+					settle();
+					return accepted;
+				}, async () => {
+					// The official theme setter does not await form.set. Recover a rejected
+					// transport here as well, without leaving an unhandled rejection.
+					if (!disposed && current === generation) {
+						try { await refresh(); } catch {}
+					}
+					settle();
+					return false;
+				});
+			};
+			theme.adopt = adopt;
+			form.set = set;
+			return () => {
+				disposed = true;
+				if (theme.adopt === adopt) theme.adopt = originalAdopt;
+				if (form.set === set) form.set = originalSet;
+			};
+		}
+		exports.installThemeWriteGuard = installThemeWriteGuard;
 		exports.installPluginManagerTransport = installPluginManagerTransport;
 		exports.name = "desktop-notifications";
 		exports.inject = ["slots", "sessions", "uiSession", "uiConversation", "uiWorkspace", "cordisInspect", "remote", "remote.pluginManager"];
@@ -748,6 +795,10 @@ window.__ModuleLoader__.load({
 		exports.DesktopContextMenuService = DesktopContextMenuService;
 		exports.createDesktopContextMenuInspectProvider = createDesktopContextMenuInspectProvider;
 		exports.apply = function apply(ctx) {
+			ctx.inject(["theme", "configForms"], (child) => {
+				child.effect(() => installThemeWriteGuard(child.theme, child.configForms.get("ui-theme"),
+					() => child.configForms.describe().load()), "desktop: ordered theme adoption");
+			});
 			ctx.effect(() => installPluginManagerTransport(ctx.remote), "desktop: official plugin switches");
 			ctx.effect(() => installSessionOpenFeedback(ctx.uiWorkspace, (message) => window.alert(message)), "desktop: session open errors");
 			const desktopContextMenu = new DesktopContextMenuService(ctx);

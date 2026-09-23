@@ -22,6 +22,8 @@ import type { DesktopUpdateService } from './desktop-update.js'
 import { filterHarnessRequestCookies } from './harness-request-cookies.js'
 import type { DesktopApprovalDecision, DesktopNotificationApproval } from './desktop-notifications.js'
 import type { PluginActivationOutcome } from '../shared/contracts.js'
+import { parseHarnessThemePreference, readStartupThemePreference, type ColorThemePreference } from './harness-theme.js'
+export { parseHarnessThemePreference } from './harness-theme.js'
 
 const STATE_CHANNEL = 'desktop:state'
 const CONTEXT_MENU_CHANNEL = 'desktop:context-menu'
@@ -35,12 +37,6 @@ const HARNESS_RELEASES_URL = 'https://github.com/deepseek-ai/deepseek-harness/re
 const HARNESS_PLUGIN_DOCUMENTATION_URL = 'https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/cli'
 const MAX_CLIPBOARD_IMAGE_PIXELS = 100_000_000
 const IMAGE_MENU_LOOKUP_TIMEOUT_MS = 500
-
-type ColorThemePreference = ColorTheme | 'system'
-
-export function parseHarnessThemePreference(value: unknown): ColorThemePreference | undefined {
-  return value === 'dark' || value === 'light' || value === 'system' ? value : undefined
-}
 
 export function resolveHarnessThemePreference(
   preference: ColorThemePreference,
@@ -100,6 +96,7 @@ export class WindowController {
   private theme: ColorTheme = nativeTheme.shouldUseDarkColors ? 'dark' : 'light'
   private themeProbeTimer: NodeJS.Timeout | undefined
   private themeProbeInFlight = false
+  private themeProbeGeneration = 0
   private pluginFailureProbeTimer: NodeJS.Timeout | undefined
   private pluginFailureProbeInFlight = false
   private contextMenuSequence = 0
@@ -148,7 +145,8 @@ export class WindowController {
       return
     }
 
-    this.theme = await this.readConfiguredTheme()
+    const startupPreference = await readStartupThemePreference(this.runtime.harnessHome, this.development.currentSettings?.patchPath)
+    this.theme = this.applyThemePreference(startupPreference)
     this.browserDevTools.setTheme(this.theme)
     this.browser?.setTheme(this.theme)
 
@@ -1336,13 +1334,16 @@ export class WindowController {
 
   private startThemeSync(): void {
     this.stopThemeSync()
+    const generation = this.themeProbeGeneration
     const probe = async (): Promise<void> => {
       if (this.themeProbeInFlight) return
       const frame = this.findHarnessFrame()
       if (frame === undefined) return
       this.themeProbeInFlight = true
       try {
-        const theme = await this.readConfiguredTheme()
+        const preference = await this.readConfiguredThemePreference()
+        if (generation !== this.themeProbeGeneration || frame !== this.findHarnessFrame()) return
+        const theme = this.applyThemePreference(preference)
         if ((theme === 'dark' || theme === 'light') && theme !== this.theme) {
           this.theme = theme
           this.browserDevTools.setTheme(theme)
@@ -1352,7 +1353,7 @@ export class WindowController {
       } catch {
         // Navigation may replace the iframe while a probe is running; the next probe retries.
       } finally {
-        this.themeProbeInFlight = false
+        if (generation === this.themeProbeGeneration) this.themeProbeInFlight = false
       }
     }
     void probe()
@@ -1377,6 +1378,10 @@ export class WindowController {
 
   private async readConfiguredTheme(): Promise<ColorTheme> {
     const preference = await this.readConfiguredThemePreference()
+    return this.applyThemePreference(preference)
+  }
+
+  private applyThemePreference(preference: ColorThemePreference): ColorTheme {
     // Native window frames follow Electron's theme source. Restore 'system'
     // before reading its color so a previous explicit override cannot stick.
     if (nativeTheme.themeSource !== preference) nativeTheme.themeSource = preference
@@ -1384,6 +1389,7 @@ export class WindowController {
   }
 
   private stopThemeSync(): void {
+    this.themeProbeGeneration += 1
     if (this.themeProbeTimer !== undefined) clearInterval(this.themeProbeTimer)
     this.themeProbeTimer = undefined
     this.themeProbeInFlight = false

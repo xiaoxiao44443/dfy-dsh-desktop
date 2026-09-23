@@ -1,4 +1,7 @@
 import { EventEmitter } from 'node:events'
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { runInNewContext } from 'node:vm'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -25,6 +28,8 @@ const electronMocks = vi.hoisted(() => ({
   ipcHandlers: new Map<string, (...args: unknown[]) => unknown>(),
   session: { webRequest: { onBeforeSendHeaders: vi.fn() } },
   window: undefined as undefined | {
+    options: Record<string, unknown>
+    loadFile: ReturnType<typeof vi.fn>
     messageHooks: Map<number, () => void>
     webContents: EventEmitter & {
       mainFrame: {
@@ -89,12 +94,12 @@ vi.mock('electron', async () => {
     readonly messageHooks = new Map<number, () => void>()
     hookWindowMessage(message: number, callback: () => void): void { this.messageHooks.set(message, callback) }
 
-    constructor() {
+    constructor(readonly options: Record<string, unknown>) {
       super()
       electronMocks.window = this
     }
 
-    async loadFile(): Promise<void> {}
+    loadFile = vi.fn(async () => {})
     async loadURL(): Promise<void> {}
     show(): void {}
     focus(): void {}
@@ -258,7 +263,7 @@ describe('notification approval dispatch', () => {
 
 describe('official plugin activation transport', () => {
   it('calls only the current Harness page and preserves service outcomes', async () => {
-    const runtime = Object.assign(new EventEmitter(), { updateState: { status: 'idle' } })
+    const runtime = Object.assign(new EventEmitter(), { harnessHome: '/unused', updateState: { status: 'idle' } })
     const development = Object.assign(new EventEmitter(), { state: {} })
     const controller = new WindowController(runtime as never, development as never)
     await controller.create()
@@ -723,6 +728,23 @@ describe('Harness theme preference parsing', () => {
 })
 
 describe('configured native theme synchronization', () => {
+  it('creates the loading window and renderer with the saved light theme on a dark OS', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'dfy-theme-window-'))
+    try {
+      await mkdir(join(home, 'profiles', 'web'), { recursive: true })
+      await writeFile(join(home, 'profiles', 'web', 'cordis.patch.yml'), '- id: ui-theme\n  config: { preference: light }')
+      const runtime = Object.assign(new EventEmitter(), { harnessHome: home, updateState: { status: 'idle' } })
+      const development = Object.assign(new EventEmitter(), { state: {}, currentSettings: {} })
+      const controller = new WindowController(runtime as never, development as never)
+      await controller.create()
+      expect(electronMocks.nativeTheme.source).toBe('light')
+      expect(electronMocks.window!.options.backgroundColor).toBe('#f4f5f7')
+      expect(electronMocks.window!.loadFile).toHaveBeenCalledWith(expect.any(String), {
+        query: expect.objectContaining({ theme: 'light' }),
+      })
+    } finally { await rm(home, { recursive: true, force: true }) }
+  })
+
   function fixture() {
     const runtime = Object.assign(new EventEmitter(), { harnessHome: '/unused-theme-test', updateState: { status: 'idle' } })
     const development = Object.assign(new EventEmitter(), { state: {} })
@@ -808,8 +830,7 @@ describe('configured native theme synchronization', () => {
   it('uses the synchronized native theme when the immediate Harness probe switches back to system', async () => {
     electronMocks.nativeTheme.source = 'light'
     electronMocks.nativeTheme.systemDark = true
-    const { access, browser } = fixture()
-    const readTheme = vi.spyOn(access, 'readConfiguredTheme')
+    const { access, preference: readTheme, browser } = fixture()
     const frame = vi.spyOn(access, 'findHarnessFrame').mockReturnValue({})
     const schedule = vi.spyOn(globalThis, 'setInterval').mockReturnValue(0 as never)
     const unschedule = vi.spyOn(globalThis, 'clearInterval').mockImplementation(() => undefined)
@@ -823,6 +844,31 @@ describe('configured native theme synchronization', () => {
       access.stopThemeSync()
       frame.mockRestore()
       readTheme.mockRestore()
+      schedule.mockRestore()
+      unschedule.mockRestore()
+    }
+  })
+
+  it('discards a slow probe from a replaced Harness frame before applying native colors', async () => {
+    const { access, preference, browser } = fixture()
+    const old = Promise.withResolvers<'light' | 'dark' | 'system'>()
+    preference.mockReturnValueOnce(old.promise).mockResolvedValue('light')
+    const frame = vi.spyOn(access, 'findHarnessFrame').mockReturnValue({})
+    const schedule = vi.spyOn(globalThis, 'setInterval').mockReturnValue(0 as never)
+    const unschedule = vi.spyOn(globalThis, 'clearInterval').mockImplementation(() => undefined)
+    try {
+      access.startThemeSync()
+      frame.mockReturnValue({})
+      access.startThemeSync()
+      await Promise.resolve()
+      old.resolve('dark')
+      await old.promise
+      expect(electronMocks.nativeTheme.source).toBe('light')
+      expect(electronMocks.nativeTheme.assignments).toEqual(['light'])
+      expect(browser.setTheme).toHaveBeenCalledExactlyOnceWith('light')
+    } finally {
+      access.stopThemeSync()
+      frame.mockRestore()
       schedule.mockRestore()
       unschedule.mockRestore()
     }
