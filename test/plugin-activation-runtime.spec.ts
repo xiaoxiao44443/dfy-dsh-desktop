@@ -6,7 +6,7 @@ import { dirname, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { expect, it } from 'vitest'
 
-it('preserves official activation and rc.1 admission decisions through the desktop Client Gateway', async () => {
+it('preserves official activation and rc.2 admission decisions through the desktop Client Gateway', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dfy-plugin-admission-'))
   try {
     const require = createRequire(import.meta.url)
@@ -16,6 +16,6 @@ it('preserves official activation and rc.1 admission decisions through the deskt
     const result = await promisify(execFile)(process.execPath, ['--expose-internals', '--require', join(root, 'harness-node-internals.cjs'),
       resolve('test/fixtures/plugin-activation-017.mjs'), require.resolve('@deepseek-ai/dsh/package.json')], { windowsHide: true })
     expect(result.stdout.match(/PASS official Client Gateway/gu)).toHaveLength(2)
-    expect(result.stdout.match(/PASS rc.1 typed compatibility refusal/gu)).toHaveLength(2)
+    expect(result.stdout.match(/PASS rc.2 typed compatibility refusal/gu)).toHaveLength(2)
   } finally { await rm(root, { recursive: true, force: true }) }
 }, 30_000)

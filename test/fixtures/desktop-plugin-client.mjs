@@ -45,6 +45,7 @@ export async function createDesktopPluginClient(dshPackagePath, call) {
     ctx.provide('uiConversation', {});
     ctx.provide('uiWorkspace', { openSession() {} });
     ctx.provide('cordisInspect', { register() { return () => {}; } });
+    ctx.provide('locale', { resolveText: text => text.en });
     await ctx.plugin(client);
     const key = Symbol.for('dsh.desktop.plugin-manager.transport.v1');
     return { transport: window[key], window, dispose: () => ctx.fiber.dispose() };

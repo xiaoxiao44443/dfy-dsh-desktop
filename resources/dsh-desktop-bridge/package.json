@@ -17,6 +17,7 @@
       "platform": "web",
       "inject": [
         "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-cordis-client-runner",
         "@deepseek-ai/dsh-client-ui-primitives"
       ]

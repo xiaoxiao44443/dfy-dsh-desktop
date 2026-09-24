@@ -1168,7 +1168,7 @@ describe('WindowController Harness reload', () => {
     expect(readyState).toMatchObject({ harnessLoadId: 2, harnessLifecycle: 'ready' })
   })
 
-  it('blocks keyboard reload shortcuts at the main window boundary', async () => {
+  it('blocks shell reload while passing modified R shortcuts to Harness', async () => {
     const runtime = Object.assign(new EventEmitter(), {
       harnessHome: '/path/that/does/not/exist',
       updateState: { status: 'idle' },
@@ -1207,6 +1207,18 @@ describe('WindowController Harness reload', () => {
       meta: false,
     })
     expect(plainR.preventDefault).not.toHaveBeenCalled()
+
+    const controlReload = { preventDefault: vi.fn() }
+    electronMocks.window?.webContents.emit('before-input-event', controlReload, { key: 'r', control: true })
+    expect(controlReload.preventDefault).toHaveBeenCalledOnce()
+
+    for (const primary of [{ control: true }, { meta: true }]) {
+      for (const modifier of [{ shift: true }, { alt: true }]) {
+        const command = { preventDefault: vi.fn() }
+        electronMocks.window?.webContents.emit('before-input-event', command, { key: 'r', ...primary, ...modifier })
+        expect(command.preventDefault).not.toHaveBeenCalled()
+      }
+    }
   })
 
   it('opens the core context menu without a Harness client plugin', async () => {

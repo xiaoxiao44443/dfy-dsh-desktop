@@ -60,11 +60,11 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export declare const name = 'desktop-notifications'
-export declare const inject: readonly ['slots', 'sessions', 'uiSession', 'uiConversation', 'uiWorkspace', 'cordisInspect', 'remote', 'remote.pluginManager']
+export declare const inject: readonly ['slots', 'sessions', 'uiSession', 'uiConversation', 'uiWorkspace', 'cordisInspect', 'locale', 'remote', 'remote.pluginManager']
 export declare function latestAssistantReply(binding: unknown): string | undefined
 export declare function latestAssistantMarker(binding: unknown): unknown
 export declare function waitForAssistantReply(binding: unknown, baseline: unknown, timeoutMs?: number): Promise<string | undefined>
-export declare function pendingInteractionSummary(binding: unknown, status: 'approval' | 'question' | 'plan-review', interaction?: unknown): string | undefined
+export declare function pendingInteractionSummary(binding: unknown, status: 'approval' | 'question' | 'plan-review', interaction?: unknown, resolveText?: (text: { en: string; [locale: string]: string }) => string): string | undefined
 export declare function installSessionNotifications(ctx: Context, send?: (notification: unknown) => Promise<void>): void
 export declare const NOTIFICATION_APPROVAL_TRANSPORT_KEY = 'dsh.desktop.notification-approval.transport.v1'
 export declare const THEME_SYNC_TRANSPORT_KEY = 'dsh.desktop.theme-sync.v1'

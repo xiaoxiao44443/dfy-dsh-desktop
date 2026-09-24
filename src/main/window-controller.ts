@@ -221,7 +221,9 @@ export class WindowController {
     }
     window.webContents.on('before-input-event', (event, input) => {
       const key = input.key.toLowerCase()
-      if (key === 'f5' || (key === 'r' && (input.control || input.meta))) event.preventDefault()
+      // Keep shell reload blocked without swallowing Harness commands such as
+      // Ctrl/Cmd+Shift+R (rename) and Ctrl/Cmd+Alt+R (refresh the current panel).
+      if (key === 'f5' || (key === 'r' && (input.control || input.meta) && !input.alt && !input.shift)) event.preventDefault()
       if (input.alt || input.meta || key === 'alt' || key === 'meta' || key === 'os' || key === 'super') {
         const contextRequestId = this.browser?.closeMenu()
         if (contextRequestId !== undefined) void this.dismissContextMenu(contextRequestId, false)

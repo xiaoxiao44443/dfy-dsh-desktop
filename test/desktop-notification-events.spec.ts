@@ -92,6 +92,7 @@ function notificationContext() {
   }
   const cleanups: Array<() => void> = []
   const ctx = {
+    locale: { resolveText: vi.fn((text: Record<string, string>) => text.zh ?? text.en) },
     sessions: { list, binding: () => ({}) },
     uiSession: { sessionStatus: statuses },
     uiConversation: { binding: () => ({ activate: vi.fn(), target: () => chat }) },
@@ -294,7 +295,8 @@ describe('desktop notification session transitions', () => {
     let requestApproval: ((request: Record<string, unknown>, next: () => Promise<string>) => Promise<string>) | undefined
     loadOfficialApprovalClient().apply({
       effect: (setup: () => unknown) => setup(),
-      locale: { register: () => () => {} },
+      inject: (dependencies: string[]) => { expect(dependencies).toEqual(['shortcuts']) },
+      locale: { ...source.ctx.locale, register: () => () => {} },
       slots: { inject: () => {} },
       sessions: { scopeOf: () => 'one' },
       remote: { $on: (_name: string, handler: typeof requestApproval) => { requestApproval = handler } },
@@ -304,8 +306,10 @@ describe('desktop notification session transitions', () => {
       } },
     })
     if (requestApproval === undefined) throw new Error('Official approval handler did not register')
-    const outcome = requestApproval({ toolName: 'desktop_restart_harness', reason: '加载已更新插件' }, async () => 'delegated')
-    const notification = send.mock.calls[0]?.[0] as { approval: NotificationApproval }
+    const outcome = requestApproval({ toolName: 'desktop_restart_harness', reason: 'Auto review denied this call.',
+      displayReason: { en: 'Auto review denied this call.', zh: '自动审阅拒绝了此调用。' } }, async () => 'delegated')
+    const notification = send.mock.calls[0]?.[0] as { approval: NotificationApproval; summary: string }
+    expect(notification.summary).toBe('desktop_restart_harness：自动审阅拒绝了此调用。')
     expect(notification.approval).toEqual({ token: expect.stringMatching(/^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/u), interactionKey: 'approval:1' })
     const transport = approvalTransport(client)!
     const command = { sessionId: 'one', ...notification.approval, decision }
@@ -314,6 +318,29 @@ describe('desktop notification session transitions', () => {
     expect(source.statuses.getSnapshot().get('one')?.pendingInteraction).toBeUndefined()
     source.dispose()
     expect(approvalTransport(client)).toBeUndefined()
+  })
+
+  it('uses the current interface language without replacing the audited approval reason', async () => {
+    const client = await loadClientModule()
+    const install = client.installSessionNotifications as (ctx: unknown, send: (value: unknown) => Promise<void>) => void
+    const source = notificationContext()
+    const send = vi.fn(async (_value: unknown) => {})
+    let language = 'zh'
+    source.ctx.locale.resolveText.mockImplementation(text => text[language] ?? text.en)
+    install(source.ctx, send)
+    const approval = { kind: 'approval', key: 'first', reason: 'Audited reason',
+      displayReason: { en: 'Review denied', zh: '审阅拒绝' } }
+    source.interactions.set(new Map([['one', approval]]))
+    language = 'en'
+    source.interactions.set(new Map([['one', { ...approval, key: 'second' }]]))
+    source.interactions.set(new Map([['one', { ...approval, key: 'legacy', displayReason: undefined }]]))
+    source.ctx.locale.resolveText.mockImplementation(() => { throw new Error('Locale unavailable') })
+    source.interactions.set(new Map([['one', { ...approval, key: 'fallback' }]]))
+    expect(send.mock.calls.map(([value]) => value)).toMatchObject([
+      { summary: '审阅拒绝' }, { summary: 'Review denied' }, { summary: 'Audited reason' }, { summary: 'Audited reason' },
+    ])
+    expect(approval.reason).toBe('Audited reason')
+    source.dispose()
   })
 
   it('expires replaced objects and removed requests without ever answering the new approval', async () => {

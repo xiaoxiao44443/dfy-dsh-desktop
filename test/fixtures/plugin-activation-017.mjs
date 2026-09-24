@@ -10,7 +10,7 @@ import { createDesktopPluginClient } from './desktop-plugin-client.mjs';
 
 const require = createRequire(realpathSync(resolve(process.argv[2])));
 const load = name => import(pathToFileURL(require.resolve(name)));
-const { boot, initProfile, loadProfileDirectory, readProfilePatches, readProfileManifest, prepareProfileEntries } = await load('@deepseek-ai/dsh-app-boot');
+const { boot, initProfile, loadProfileDirectory, readProfilePatches, readProfileManifest, prepareProfileEntries, reportSkippedBundles } = await load('@deepseek-ai/dsh-app-boot');
 const { default: PluginManager } = await load('@deepseek-ai/dsh-plugin-manager');
 const { default: Hmr } = await load('@deepseek-ai/dsh-hmr');
 const { default: Timer } = await load('@deepseek-ai/cordis-plugin-timer');
@@ -106,13 +106,19 @@ for (const live of [false, true]) {
       writeFileSync(join(dir, 'package.json'), JSON.stringify({ ...before, dsh: { profile: { bundles: [...before.dsh.profile.bundles, 'incompatible'] } } }));
       const loaded = loadProfileDirectory('dsh', dir, anchor);
       assert.ok(!loaded.layers.some(layer => layer.packageName === 'incompatible'));
+      assert.equal(loaded.skippedBundles[0].packageName, 'incompatible');
+      // rc.2 keeps loading silent; the official launcher reports skips once.
+      loadProfileDirectory('dsh', dir, anchor);
+      assert.ok(!diagnostics.join('').includes('skipping profile bundle'));
+      reportSkippedBundles('dsh', loaded);
       assert.match(diagnostics.join(''), /dsh: disabling profile plugin row "blocked": Plugin incompatible@1.0.0 is incompatible/);
       assert.match(diagnostics.join(''), /dsh: skipping profile bundle "incompatible": Error: Plugin incompatible@1.0.0 is incompatible/);
+      assert.equal(diagnostics.join('').match(/skipping profile bundle/g).length, 1);
     } finally {
       process.stderr.write = stderr;
       writeFileSync(join(dir, 'package.json'), JSON.stringify(before));
     }
-    console.log(`PASS rc.1 typed compatibility refusal, row preflight and bundle skip (HMR ${live})`);
+    console.log(`PASS rc.2 typed compatibility refusal, row preflight and bundle skip (HMR ${live})`);
     await client.dispose();
     assert.equal(client.window[Symbol.for('dsh.desktop.plugin-manager.transport.v1')], undefined);
     console.log(`PASS official Client Gateway bundle switches, dependency preservation and bridge lifecycle (HMR ${live})`);

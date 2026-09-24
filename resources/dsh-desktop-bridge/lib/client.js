@@ -377,11 +377,18 @@ window.__ModuleLoader__.load({
 			}, timeoutMs, signal);
 		}
 
-		function pendingInteractionSummary(binding, status, interaction) {
+		function pendingInteractionSummary(binding, status, interaction, resolveText) {
 			const detail = interaction;
 			if (detail === null || typeof detail !== "object") return void 0;
 			if (status === "approval") {
-				const reason = typeof detail.reason === "string" ? detail.reason.trim() : "";
+				let reason = typeof detail.reason === "string" ? detail.reason.trim() : "";
+				if (detail.displayReason !== null && typeof detail.displayReason === "object"
+					&& typeof detail.displayReason.en === "string") {
+					try {
+						const localized = resolveText?.(detail.displayReason) ?? detail.displayReason.en;
+						if (typeof localized === "string" && localized.trim().length > 0) reason = localized.trim();
+					} catch { /* Keep the original reason if presentation cannot be resolved. */ }
+				}
 				const toolName = typeof detail.toolName === "string" ? detail.toolName.trim() : "";
 				if (reason.length > 0 && toolName.length > 0) return `${toolName}：${reason}`.slice(0, 4e3);
 				if (reason.length > 0) return reason.slice(0, 4e3);
@@ -497,7 +504,7 @@ window.__ModuleLoader__.load({
 						if (!active) return;
 						const summary = notification.kind === "turn-complete"
 							? await waitForAssistantReply(binding, baseline, undefined, cancel.signal)
-							: pendingInteractionSummary(binding, notification.kind, interaction);
+							: pendingInteractionSummary(binding, notification.kind, interaction, (text) => ctx.locale.resolveText(text));
 						if (!active) return;
 						const current = snapshot().get(notification.sessionId);
 						if (notification.kind === "turn-complete" && (current === undefined || current.running || current.pendingInteraction !== undefined || runVersions.get(notification.sessionId) !== runVersion)) return;
@@ -819,7 +826,7 @@ window.__ModuleLoader__.load({
 		exports.installThemeSyncTransport = installThemeSyncTransport;
 		exports.installPluginManagerTransport = installPluginManagerTransport;
 		exports.name = "desktop-notifications";
-		exports.inject = ["slots", "sessions", "uiSession", "uiConversation", "uiWorkspace", "cordisInspect", "remote", "remote.pluginManager"];
+		exports.inject = ["slots", "sessions", "uiSession", "uiConversation", "uiWorkspace", "cordisInspect", "locale", "remote", "remote.pluginManager"];
 		exports.projectSessions = projectSessions;
 		exports.diffSessionNotifications = diffSessionNotifications;
 		exports.latestAssistantReply = latestAssistantReply;
