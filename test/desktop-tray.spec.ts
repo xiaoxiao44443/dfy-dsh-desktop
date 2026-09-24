@@ -82,6 +82,8 @@ describe('desktop tray lifecycle', () => {
     first.click('quit-on-close', true)
     expect(JSON.parse(await readFile(first.options.settingsPath, 'utf8'))).toEqual({ quitOnClose: true })
     first.close()
+    expect(first.options.quit).not.toHaveBeenCalled()
+    await new Promise<void>(resolve => setImmediate(resolve))
     expect(first.options.quit).toHaveBeenCalledOnce()
     expect(first.window.hide).not.toHaveBeenCalled()
     first.service.dispose()
@@ -95,6 +97,33 @@ describe('desktop tray lifecycle', () => {
     const last = fixture(platform)
     expect(mocks.items.find(item => item.id === 'quit-on-close')?.checked).toBe(false)
     last.service.dispose()
+  })
+
+  it.each(['win32', 'darwin'] as const)('waits for the cancelled close to return before quitting on %s and coalesces repeated closes', async (platform) => {
+    const f = fixture(platform)
+    f.click('quit-on-close', true)
+    f.options.quit.mockImplementation(() => {
+      f.service.dispose() // before-quit must remove the interceptor before Electron closes again.
+      expect(f.close().preventDefault).not.toHaveBeenCalled()
+    })
+    expect(f.close().preventDefault).toHaveBeenCalledOnce()
+    expect(f.close().preventDefault).toHaveBeenCalledOnce()
+    expect(f.options.quit).not.toHaveBeenCalled()
+    expect(f.service.isActive).toBe(true)
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(f.options.quit).toHaveBeenCalledOnce()
+    expect(f.window.hide).not.toHaveBeenCalled()
+    expect(f.service.isActive).toBe(false)
+  })
+
+  it('cancels a pending close-to-quit when another quit path disposes the tray first', async () => {
+    const f = fixture('darwin')
+    f.click('quit-on-close', true)
+    f.close()
+    f.click('quit')
+    f.service.dispose()
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(f.options.quit).toHaveBeenCalledOnce()
   })
 
   it('lets explicit quit and OS shutdown close normally instead of hiding again', () => {

@@ -18,6 +18,7 @@ export class DesktopTray {
   private tray: Tray | undefined
   private window: BrowserWindow | undefined
   private quitOnClose = false
+  private pendingQuit: NodeJS.Immediate | undefined
 
   constructor(private readonly options: DesktopTrayOptions) {}
 
@@ -80,6 +81,8 @@ export class DesktopTray {
   }
 
   dispose(): void {
+    if (this.pendingQuit !== undefined) clearImmediate(this.pendingQuit)
+    this.pendingQuit = undefined
     this.detachWindow()
     this.tray?.destroy()
     this.tray = undefined
@@ -89,8 +92,17 @@ export class DesktopTray {
     const window = this.window
     if (!this.isActive || event.defaultPrevented || window === undefined || window.isDestroyed()) return
     event.preventDefault()
-    if (this.quitOnClose) this.options.quit()
-    else window.hide()
+    if (this.quitOnClose) {
+      // Calling app.quit inside a cancelled close event re-enters Electron's
+      // window teardown. macOS can close every window but cancel app termination,
+      // leaving a Dock process after before-quit already disposed the tray.
+      if (this.pendingQuit === undefined) {
+        this.pendingQuit = setImmediate(() => {
+          this.pendingQuit = undefined
+          this.options.quit()
+        })
+      }
+    } else window.hide()
   }
 
   private readonly onClosed = (): void => { this.detachWindow() }
