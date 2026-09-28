@@ -1,2 +1,3 @@
 "CFBundleDisplayName" = "DFY DSH Desktop";
 "CFBundleName" = "DFY DSH Desktop";
+"NSMicrophoneUsageDescription" = "DFY DSH Desktop 使用麥克風將語音轉寫為訊息草稿。";

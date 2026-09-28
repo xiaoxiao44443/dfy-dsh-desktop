@@ -1,7 +1,7 @@
 {
   "name": "dfy-dsh-desktop",
   "productName": "DFY DSH Desktop",
-  "version": "0.1.7-rc.2",
+  "version": "0.2.0-rc.1",
   "description": "A fast desktop shell for DeepSeek Harness with managed Harness runtime updates.",
   "type": "module",
   "main": "dist/main/index.js",
@@ -38,7 +38,7 @@
     "yaml": "2.9.0"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh": "0.1.7-rc.2",
+    "@deepseek-ai/dsh": "0.2.0-rc.1",
     "@types/node": "24.10.1",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
@@ -128,6 +128,7 @@
         }
       ],
       "extendInfo": {
+        "NSMicrophoneUsageDescription": "DFY DSH Desktop uses your microphone to transcribe speech into message drafts.",
         "CFBundleDevelopmentRegion": "en",
         "CFBundleLocalizations": [
           "en",

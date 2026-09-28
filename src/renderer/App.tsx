@@ -1479,7 +1479,7 @@ export function App(): ReactNode {
     <>
       <main ref={contentRef} className="content">
         <section className="harness-pane">
-          {harnessUrl ? <iframe key={state?.harnessLoadId} ref={harnessFrame} id="harness-frame" name="harness-frame" className="harness-frame" title="DeepSeek Harness" allow="clipboard-read; clipboard-write" src={harnessUrl} onLoad={() => void desktopApi.reportHarnessFrameLoaded(harnessUrl)} /> : null}
+          {harnessUrl ? <iframe key={state?.harnessLoadId} ref={harnessFrame} id="harness-frame" name="harness-frame" className="harness-frame" title="DeepSeek Harness" allow="clipboard-read; clipboard-write; microphone 'src'" src={harnessUrl} onLoad={() => void desktopApi.reportHarnessFrameLoaded(harnessUrl)} /> : null}
           {ready && pluginFailures.length > 0 ? <details className="plugin-load-warning">
             <summary>有 {pluginFailures.length} 个插件未能加载，Harness 仍可使用 · 查看详情</summary>
             <PluginFailurePanel failures={pluginFailures} pending={startupActionPending} error={startupActionError} onRecover={(ids) => void runStartupAction(() => desktopApi.recoverFailedPlugins(ids))} />
