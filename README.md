@@ -12,13 +12,13 @@ DeepSeek Harness 的轻量 Electron 桌面壳。Harness 仍是完整、未修改
 - 桌面端不覆盖 `DSH_HOME`：Harness 遵循官方解析顺序（显式配置、`$DSH_HOME`、`~/.dsh`）。因此外部 dsh 与桌面端自然共享配置、会话、Profile、凭据和扩展；项目工作区仍由 Harness 自己管理。
 - 桌面壳自己的 Chromium 状态、运行时、更新缓存和开发设置统一位于 `~/.saltfish/dfy-dsh-desktop`，Windows、macOS 与 Linux 使用同一目录约定。首次启动会自动迁移旧版 `~/.saltfish/deepseek-harness-desktop`。
 - Harness 核心安装在版本化目录。新版本先由 pnpm 安装到 staging，经桌面启动器运行 `dsh --version` 并核对输出后才标记待更新；使用当前 DSH 的显式 `runCli()` 入口。下次启动先试运行新版本，失败会显示原因；回退和手动切换前检查已落盘的会话日志格式，阻止旧运行时读取升级后的会话。
-- 当前桌面端与内置 DSH 均为 `0.2.0-rc.1`，Electron 保持 `43.4.0`，模块解析使用已有的 `--expose-internals` 入口，可安装和启动的 DSH 最低版本为 `0.1.7-alpha.1`。旧日志迁移仅为已审计的 `dfy-media`、`dfy-session-image` 块补充严格准入，由官方迁移至 V4 的 `plugin:` 内容块；保留原日志和图片引用。旧插件设置迁入配置树且不覆盖已有新配置。视觉理解插件停止加载，保留其包和原设置。
+- 当前桌面端与内置 DSH 均为 `0.2.0-rc.2`，Electron 保持 `43.4.0`，模块解析使用已有的 `--expose-internals` 入口，可安装和启动的 DSH 最低版本为 `0.1.7-alpha.1`。旧日志迁移仅为已审计的 `dfy-media`、`dfy-session-image` 块补充严格准入，由官方迁移至 V4 的 `plugin:` 内容块；保留原日志和图片引用。旧插件设置迁入配置树且不覆盖已有新配置。视觉理解插件停止加载，保留其包和原设置。
 - 兼容 DSH `rc.1` 的插件版本检查：启用被拒绝时显示插件版本、当前 DSH 版本及未满足的依赖范围；启动时被阻止的组件与组合包会显示在加载提示中。已经由 DSH 阻止加载的条目不会生成临时禁用补丁；版本例外仍由 DSH 官方插件管理器管理。
 - 启动窗口先使用已保存的主题；Harness 的主题配置就绪后才开始同步实时主题，避免初始化期间临时的“跟随系统”状态让标题栏闪白。明暗主题与跟随系统的切换通过事件立即同步标题栏、浏览器与 DevTools，不再等待定时读取。
 - 桌面端为每个受管 Harness 运行时生成同源的 `dsh`、`pnpm` 和 `node` 启动器，并把它们注入 Harness 进程的 `PATH`。因此标题菜单里的开发操作、Harness 自己的终端和 Agent 启动的子进程使用的是同一套版本，不会出现“壳能用、dsh 自己不能用”的分叉。
 - 桌面端通过内置 Host + Client 插件 `dsh-desktop-bridge` 提供受审批的 `desktop_restart_harness` 工具、回复/权限/提问系统通知，并监测当前 Web Profile 是否在进程启动后发生变化。模型可以请求由 Electron 主进程安全重启 Harness，从而加载新安装的插件；桥接层使用桌面私有 `--patch` 和专用模块解析器注入。桌面端还会在当前 Web Profile 的 `node_modules` 中维护 `dsh-desktop-bridge`、`dsh-desktop-browser` 的目录链接，供官方插件清单检查读取包名和版本。启动与插件命令结束时会修复缺失、失效的链接；同名普通文件或目录会报错并保留。此过程不改写 Profile 的依赖声明或 bundle 配置。
 
-本项目通过本地 Harness 服务承载官方 Web profile，载体封装在 `HarnessProcess` 与 `WindowController` 内。当前版本的接入调整与验证记录见 [0.2.0-rc.1 适配说明](docs/compatibility-0.2.0-rc.1.md)。
+本项目通过本地 Harness 服务承载官方 Web profile，载体封装在 `HarnessProcess` 与 `WindowController` 内。当前版本的接入调整与验证记录见 [0.2.0-rc.2 适配说明](docs/compatibility-0.2.0-rc.2.md)。
 
 ## 开发
 
@@ -63,6 +63,10 @@ pnpm package:mac:arm64
 ```
 
 Harness 运行时包含平台相关的原生依赖，因此 `prepare:runtime` 必须在目标平台和架构上执行。仓库提供 `.github/workflows/build-macos-intel.yml` 和 `.github/workflows/build-macos-arm64.yml`，分别使用 Intel 和 ARM64 macOS Runner 准备运行时、构建 DMG/ZIP，并检查打包后的 Electron、原生依赖和 Harness 启动入口。推送 `v*` 标签会构建 Windows x64、macOS Intel、macOS Apple Silicon 三个平台，统一发布安装包与 SHA-256 校验文件。客户端更新会选择对应架构的安装包。
+
+桌面端更新在用户点击下载后，对 GitHub 直连、`gh-proxy.com`、`ghproxy.net`、`ghfast.top` 并行测速：每条线路读取安装包前 512 KiB，最多等待 8 秒，按包含连接耗时的实测速度排序。同一安装包的测速结果在本进程缓存 30 分钟。下载时显示当前线路和速度，遇到错误、15 秒没有响应、大小或摘要不匹配时，自动从头尝试下一条测速成功的线路；本地磁盘错误直接报告。只有全部文件通过校验才允许安装。
+
+版本信息仍从 GitHub API 获取，优先使用 API 中的 SHA-256 摘要；旧 Release 没有摘要时，从原始地址读取 `SHA256SUMS.txt`。第三方加速仅用于本项目公开的 GitHub Release 安装包，不代理配置、凭据、私有地址或开发演示链接。此功能不更改 DSH 的 npm 更新源。
 
 暂定版本规则：桌面端默认与内置 DSH 使用相同版本号；同一 DSH 版本下再次更新桌面端时，追加 `-1`、`-2` 等递增修订号。例如 DSH 为 `0.1.5-alpha.1` 时，桌面端依次发布 `0.1.5-alpha.1`、`0.1.5-alpha.1-1`、`0.1.5-alpha.1-2`；升级 DSH 后重新从其原版本号开始。Git 标签使用 `v` 前缀，发布说明保存在 `.github/release-notes/<标签>.md`。
 

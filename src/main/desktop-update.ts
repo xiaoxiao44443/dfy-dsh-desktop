@@ -1,9 +1,9 @@
-import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { access, mkdir, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import semver from 'semver'
 import type { DesktopUpdateState } from '../shared/contracts.js'
+import { DesktopInstallerDownloader, fetchDesktopChecksums } from './desktop-download.js'
 
 const RELEASES_API_URL = 'https://api.github.com/repos/xiaoxiao44443/dfy-dsh-desktop/releases?per_page=20'
 const RELEASES_PAGE_URL = 'https://github.com/xiaoxiao44443/dfy-dsh-desktop/releases'
@@ -16,6 +16,7 @@ interface GitHubReleaseAsset {
   name: string
   browser_download_url: string
   size: number
+  digest?: string | null
 }
 
 interface GitHubRelease {
@@ -32,7 +33,7 @@ interface DesktopReleaseCandidate {
   publishedAt?: string
   releaseUrl: string
   installer: GitHubReleaseAsset
-  checksums: GitHubReleaseAsset
+  checksums?: GitHubReleaseAsset
 }
 
 interface PendingDesktopUpdate {
@@ -131,6 +132,16 @@ function parseChecksumFile(contents: string, assetName: string): string | undefi
   return undefined
 }
 
+function assetChecksum(asset: GitHubReleaseAsset): string | undefined {
+  return typeof asset.digest === 'string' ? /^sha256:([0-9a-f]{64})$/iu.exec(asset.digest)?.[1]?.toLowerCase() : undefined
+}
+
+function downloadSpeed(bytesPerSecond: number): string {
+  return bytesPerSecond >= 1024 * 1024
+    ? `${(bytesPerSecond / (1024 * 1024)).toFixed(1)} MB/s`
+    : `${Math.round(bytesPerSecond / 1024)} KB/s`
+}
+
 export class DesktopUpdateService extends EventEmitter {
   private view: DesktopUpdateState = { status: 'idle' }
   private candidate: DesktopReleaseCandidate | undefined
@@ -141,6 +152,7 @@ export class DesktopUpdateService extends EventEmitter {
   private readonly platform: NodeJS.Platform
   private readonly arch: string
   private readonly fetcher: typeof globalThis.fetch
+  private readonly downloader: DesktopInstallerDownloader
   private readonly releasesApiUrl: string
   private readonly releasesPageUrl: string
   private readonly allowLoopbackHttp: boolean
@@ -151,6 +163,7 @@ export class DesktopUpdateService extends EventEmitter {
     this.platform = options.platform ?? process.platform
     this.arch = options.arch ?? process.arch
     this.fetcher = options.fetcher ?? globalThis.fetch
+    this.downloader = new DesktopInstallerDownloader(this.fetcher)
     this.allowLoopbackHttp = options.allowLoopbackHttp === true
     this.removeUpdatePath = options.removeUpdatePath ?? (async (path) => {
       await rm(path, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
@@ -249,6 +262,7 @@ export class DesktopUpdateService extends EventEmitter {
         throw new Error(`暂不支持 ${this.platform}/${this.arch} 的覆盖安装。`)
       }
       const response = await this.fetcher(this.releasesApiUrl, {
+        signal: AbortSignal.timeout(15_000),
         headers: {
           Accept: 'application/vnd.github+json',
           'User-Agent': 'DFY-DSH-Desktop',
@@ -289,7 +303,7 @@ export class DesktopUpdateService extends EventEmitter {
       const checksums = assets.find((asset) => asset.name === 'SHA256SUMS.txt'
         && asset.size > 0
         && asset.size <= MAX_CHECKSUM_FILE_BYTES)
-      if (installer === undefined || checksums === undefined) {
+      if (installer === undefined || (checksums === undefined && assetChecksum(installer) === undefined)) {
         throw new Error(`桌面端 ${release.version} 缺少适用于当前系统的安装包或校验文件。`)
       }
       this.candidate = {
@@ -299,7 +313,7 @@ export class DesktopUpdateService extends EventEmitter {
           : { publishedAt: release.entry.published_at }),
         releaseUrl: release.entry.html_url,
         installer,
-        checksums,
+        ...(checksums === undefined ? {} : { checksums }),
       }
       this.setState({
         status: 'available',
@@ -334,44 +348,26 @@ export class DesktopUpdateService extends EventEmitter {
       if (this.pending !== undefined) await this.removePending(this.pending)
       await this.cleanupUpdateDirectories()
       await mkdir(versionRoot, { recursive: true })
-      const checksumResponse = await this.fetcher(candidate.checksums.browser_download_url)
-      if (!checksumResponse.ok) throw new Error(`安装包校验信息下载失败（HTTP ${checksumResponse.status}）。`)
-      const checksumContents = await checksumResponse.text()
-      if (Buffer.byteLength(checksumContents) > MAX_CHECKSUM_FILE_BYTES) throw new Error('安装包校验文件过大。')
-      const expectedChecksum = parseChecksumFile(checksumContents, candidate.installer.name)
-      if (expectedChecksum === undefined) throw new Error('校验文件中没有当前安装包的 SHA-256。')
-
-      const response = await this.fetcher(candidate.installer.browser_download_url)
-      if (!response.ok || response.body === null) throw new Error(`桌面端安装包下载失败（HTTP ${response.status}）。`)
-      const handle = await open(partialPath, 'w', 0o600)
-      const digest = createHash('sha256')
-      let downloaded = 0
-      let lastProgress = -1
-      try {
-        const reader = response.body.getReader()
-        while (true) {
-          const chunk = await reader.read()
-          if (chunk.done) break
-          downloaded += chunk.value.byteLength
-          if (downloaded > MAX_INSTALLER_BYTES) throw new Error('桌面端安装包超过允许的大小。')
-          digest.update(chunk.value)
-          let offset = 0
-          while (offset < chunk.value.byteLength) {
-            const { bytesWritten } = await handle.write(chunk.value, offset, chunk.value.byteLength - offset, null)
-            if (bytesWritten < 1) throw new Error('桌面端安装包写入失败。')
-            offset += bytesWritten
-          }
-          const progress = Math.min(100, Math.floor((downloaded / candidate.installer.size) * 100))
-          if (progress !== lastProgress) {
-            lastProgress = progress
-            this.setState({ ...this.view, progress, message: '正在下载桌面端安装包…' })
-          }
-        }
-      } finally {
-        await handle.close()
+      let expectedChecksum = assetChecksum(candidate.installer)
+      if (expectedChecksum === undefined && candidate.checksums !== undefined) {
+        const contents = await fetchDesktopChecksums(this.fetcher, candidate.checksums.browser_download_url)
+        expectedChecksum = parseChecksumFile(contents, candidate.installer.name)
       }
-      if (downloaded !== candidate.installer.size) throw new Error('桌面端安装包大小与 Release 信息不一致。')
-      if (digest.digest('hex') !== expectedChecksum) throw new Error('桌面端安装包 SHA-256 校验失败。')
+      if (expectedChecksum === undefined) throw new Error('校验文件中没有当前安装包的 SHA-256。')
+      await this.downloader.download({
+        url: candidate.installer.browser_download_url,
+        size: candidate.installer.size,
+        checksum: expectedChecksum,
+        partialPath,
+        onTesting: () => this.setState({ ...this.view, progress: 0, message: '正在测速，自动选择最快下载线路…' }),
+        onFallback: (source) => this.setState({ ...this.view, progress: 0, message: `当前线路不可用，正在切换至 ${source}…` }),
+        onProgress: ({ source, downloaded, bytesPerSecond, verifying }) => this.setState({
+          ...this.view,
+          progress: Math.min(99, Math.floor(downloaded / candidate.installer.size * 100)),
+          message: verifying ? '正在校验安装包完整性…'
+            : `正在通过 ${source} 下载${bytesPerSecond > 0 ? ` · ${downloadSpeed(bytesPerSecond)}` : '…'}`,
+        }),
+      })
       await rm(finalPath, { force: true })
       await rename(partialPath, finalPath)
       const pending: PendingDesktopUpdate = {

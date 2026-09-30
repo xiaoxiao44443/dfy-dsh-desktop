@@ -211,6 +211,81 @@ describe('DesktopUpdateService', () => {
     expect(removeUpdatePath).toHaveBeenCalledWith(versionRoot)
   })
 
+  it('uses the GitHub API digest without fetching a checksum file', async () => {
+    const installer = Buffer.from('API verified installer')
+    const version = '0.2.0-rc.2'
+    const releases = releasePayload(version, installer) as Array<{ assets: Array<Record<string, unknown>> }>
+    releases[0]!.assets = [releases[0]!.assets[0]!]
+    releases[0]!.assets[0]!.digest = `sha256:${createHash('sha256').update(installer).digest('hex')}`
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      if (String(input).includes('api.github.com')) return Response.json(releases)
+      expect(String(input)).not.toContain('SHA256SUMS')
+      return new Response(installer)
+    })
+    const service = new DesktopUpdateService({ updatesRoot: await updateRoot(), currentVersion: '0.2.0-rc.1',
+      platform: 'darwin', arch: 'x64', fetcher })
+    await service.initialize()
+    await service.checkForUpdates()
+    await service.downloadUpdate()
+    expect(service.state).toMatchObject({ status: 'ready', version })
+    expect(await readFile(await service.installerPath())).toEqual(installer)
+    expect(fetcher).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not publish a downloaded installer with an invalid API digest', async () => {
+    const installer = Buffer.from('tampered installer')
+    const releases = releasePayload('0.2.0-rc.2', installer) as Array<{ assets: Array<Record<string, unknown>> }>
+    releases[0]!.assets[0]!.digest = `sha256:${'0'.repeat(64)}`
+    const root = await updateRoot()
+    const fetcher = vi.fn(async (input: string | URL | Request) => String(input).includes('api.github.com')
+      ? Response.json(releases) : new Response(installer))
+    const service = new DesktopUpdateService({ updatesRoot: root, currentVersion: '0.2.0-rc.1',
+      platform: 'darwin', arch: 'x64', fetcher })
+    await service.initialize()
+    await service.checkForUpdates()
+    await expect(service.downloadUpdate()).rejects.toThrow('SHA-256 校验失败')
+    expect(service.state.status).toBe('error')
+    expect(await readdir(root)).toEqual([])
+  })
+
+  it('publishes probing and selected mirror progress through the update service', async () => {
+    const installer = Buffer.from('mirror verified installer')
+    const version = '0.2.0-rc.2'
+    const releases = releasePayload(version, installer) as Array<{ assets: Array<Record<string, unknown>> }>
+    const asset = releases[0]!.assets[0]!
+    const assetUrl = `https://github.com/xiaoxiao44443/dfy-dsh-desktop/releases/download/v${version}/${String(asset.name)}`
+    asset.browser_download_url = assetUrl
+    asset.digest = `sha256:${createHash('sha256').update(installer).digest('hex')}`
+    const probes: string[] = []
+    const downloads: string[] = []
+    const messages: string[] = []
+    const fetcher = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input)
+      if (url.startsWith('https://api.github.com/')) return Response.json(releases)
+      expect(url).not.toContain('SHA256SUMS')
+      if (new Headers(init?.headers).has('range')) {
+        probes.push(url)
+        await new Promise(resolve => setTimeout(resolve, url.startsWith('https://ghfast.top/') ? 5 : 70))
+        return new Response(installer, { status: 206, headers: { 'content-range': `bytes 0-${installer.length - 1}/${installer.length}` } })
+      }
+      downloads.push(url)
+      return new Response(installer)
+    })
+    const service = new DesktopUpdateService({ updatesRoot: await updateRoot(), currentVersion: '0.2.0-rc.1',
+      platform: 'darwin', arch: 'x64', fetcher })
+    service.on('state', state => messages.push(state.message))
+    await service.initialize()
+    await service.checkForUpdates()
+    expect(probes).toEqual([])
+    await service.downloadUpdate()
+    expect(probes).toHaveLength(4)
+    expect(downloads).toEqual([`https://ghfast.top/${assetUrl}`])
+    expect(messages.some(message => message.includes('正在测速'))).toBe(true)
+    expect(messages.some(message => message.includes('ghfast.top'))).toBe(true)
+    expect(service.state).toMatchObject({ status: 'ready', progress: 100 })
+    expect(await readFile(await service.installerPath())).toEqual(installer)
+  })
+
   it('does not offer prerelease builds to a stable desktop version', async () => {
     const installer = Buffer.from('alpha installer')
     const fetcher = vi.fn(async () => new Response(JSON.stringify(releasePayload('0.1.2-alpha.3', installer)), {

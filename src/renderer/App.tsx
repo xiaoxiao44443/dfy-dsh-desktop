@@ -297,7 +297,7 @@ function DesktopUpdatePanel({ open, state, onClose }: { open: boolean; state: De
       : update.status === 'ready' ? `版本 ${update.version ?? ''} 已准备好`.trim()
         : update.status === 'available' ? `发现版本 ${update.version ?? ''}`.trim()
           : update.status === 'current' ? '当前已是最新版本'
-            : update.status === 'error' ? '桌面端更新检查失败'
+            : update.status === 'error' ? '桌面端更新失败'
               : '尚未检查版本'
   const installHint = state.platform === 'macos'
     ? '打开 DMG 后，将应用拖入 Applications 并选择“替换”。'
@@ -309,7 +309,7 @@ function DesktopUpdatePanel({ open, state, onClose }: { open: boolean; state: De
   return (
     <Modal open={open} className="desktop-update-dialog" labelledBy="desktop-update-title" closeLabel="关闭桌面端更新" onClose={onClose}>
       <header className="dialog-header">
-        <div className="dialog-heading"><span className="update-dialog-icon" aria-hidden="true"><Download /></span><div><h2 id="desktop-update-title">桌面端更新</h2><p>只检查版本，确认后再下载安装包</p></div></div>
+        <div className="dialog-heading"><span className="update-dialog-icon" aria-hidden="true"><Download /></span><div><h2 id="desktop-update-title">桌面端更新</h2><p>下载时自动测速并选择最快线路</p></div></div>
         <button className="dialog-close" type="button" aria-label="关闭桌面端更新" title="关闭" onClick={onClose}><X /></button>
       </header>
       <div className="dialog-content desktop-update-content">
