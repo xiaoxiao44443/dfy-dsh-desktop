@@ -94,7 +94,7 @@ for (const live of [false, true]) {
     assert.equal(refusal.application, 'failed');
     assert.equal(refusal.error.code, 'incompatible-version');
     assert.equal(refusal.changed, false);
-    assert.deepEqual(refusal.error.incompatible[0].peers, { '@deepseek-ai/dsh': '>=99.0.0' });
+    assert.deepEqual(refusal.error.incompatible[0].requirements, { '@deepseek-ai/dsh': '>=99.0.0' });
     assert.equal(refusal.error.incompatible[0].name, 'incompatible');
     assert.deepEqual(readProfileManifest('test', dir), before);
     const stderr = process.stderr.write;

@@ -25,7 +25,10 @@ export async function createDesktopPluginClient(dshPackagePath, call) {
       throw new Error(`Unexpected client dependency: ${name}`);
     });
   };
-  const gateway = loadClient(new URL('lib/client.js', pathToFileURL(require.resolve('@deepseek-ai/dsh-api-gateway/package.json'))));
+  const gatewayManifest = require('@deepseek-ai/dsh-api-gateway/package.json');
+  const gatewayEntry = gatewayManifest.exports['./client'];
+  const gateway = loadClient(new URL(gatewayEntry.browser ?? gatewayEntry.default,
+    pathToFileURL(require.resolve('@deepseek-ai/dsh-api-gateway/package.json'))));
   const client = loadClient(new URL('../../resources/dsh-desktop-bridge/lib/client.js', import.meta.url));
   const ctx = new cordis.Context();
   try {

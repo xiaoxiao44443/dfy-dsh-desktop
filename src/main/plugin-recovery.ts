@@ -92,13 +92,14 @@ export function parsePluginInitializationFailures(output: string): PluginInitial
 }
 
 function parseCompatibilityWarning(reason: string): PluginCompatibilityIssue | undefined {
-  const match = /^(?:Error: )?Plugin (\S+)@(\S+) is incompatible with dsh (\S+): peerDependencies (\{.*?\})\./u.exec(reason)
+  const match = /^(?:Error: )?Plugin (\S+)@(\S+) is incompatible with dsh (\S+): (peerDependencies|requirements) (\{.*?\})\./u.exec(reason)
   if (!match) return undefined
   try {
-    const peers: unknown = JSON.parse(match[4]!)
+    const peers: unknown = JSON.parse(match[5]!)
     if (peers === null || typeof peers !== 'object' || Array.isArray(peers)
       || Object.values(peers).some((value) => typeof value !== 'string')) return undefined
-    return { name: match[1]!, version: match[2]!, runtimeVersion: match[3]!, peers: peers as Record<string, string> }
+    return { name: match[1]!, version: match[2]!, runtimeVersion: match[3]!,
+      [match[4] === 'requirements' ? 'requirements' : 'peers']: peers as Record<string, string> }
   } catch { return undefined }
 }
 

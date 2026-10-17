@@ -133,6 +133,17 @@ client (client-package): pending (waiting for service: broken)
     expect(failures[1]).toMatchObject({ scope: 'bundle', bundleName: '@sample/bundle', pluginName: '@sample/bundle', recoverable: false })
   })
 
+  it('reports 0.2.1 engine requirements for a component and its bundle', () => {
+    const warning = 'Plugin @sample/component@1.2.0 is incompatible with dsh 0.2.1-rc.2: requirements {"engines.dsh":">=0.3.0"}.'
+    const failures = parsePluginInitializationFailures(`dsh: disabling profile plugin row "component": ${warning}\n`
+      + `dsh: skipping profile bundle "@sample/bundle": Error: ${warning.replace('@sample/component', '@sample/bundle')}\n`)
+    expect(failures).toHaveLength(2)
+    expect(failures[0]).toMatchObject({ pluginName: '@sample/component', recoverable: false,
+      incompatibility: { requirements: { 'engines.dsh': '>=0.3.0' } } })
+    expect(failures[0]?.detail).toContain('要求：DSH >=0.3.0')
+    expect(failures[1]).toMatchObject({ scope: 'bundle', bundleName: '@sample/bundle', blockedByCompatibility: true })
+  })
+
   it('handles id-less rows and metadata validation failures, ignoring unrelated output', () => {
     const warning = 'Plugin @sample/component@1.0.0 is incompatible with dsh 0.1.7-rc.1: peerDependencies {"@deepseek-ai/dsh":">=9"}.'
     const failures = parsePluginInitializationFailures(`dsh: disabling profile plugin file:///E:/plugin/index.js: ${warning}\n`

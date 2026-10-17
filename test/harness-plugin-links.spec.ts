@@ -108,7 +108,7 @@ describe('desktop plugin package links', () => {
     expect((await lstat(link())).ino).toBe(before.ino)
   })
 
-  it('repairs the real DSH plugin inventory failure before any model request is sent', async () => {
+  it('makes the real DSH plugin inventory complete before any model request is sent', async () => {
     const { paths } = await fixture()
     const dshRequire = createRequire(await realpath(new URL('../node_modules/@deepseek-ai/dsh/package.json', import.meta.url)))
     const baseRequire = createRequire(dshRequire.resolve('@deepseek-ai/dsh-base'))
@@ -120,12 +120,14 @@ describe('desktop plugin package links', () => {
       baseUrl,
       get: () => undefined,
       agents: { get: () => undefined },
+      logger: { warn() {} },
       loader: { entries: () => packageNames.map((name) => ({ options: { name }, parent: { tree }, fiber: { state: 2 } })) },
       deepseekLlmApiExtensions: { register: (_field: string, value: typeof provider) => { provider = value } },
     }, { enabled: true })
     if (provider === undefined) throw new Error('Inventory provider was not registered')
     const request = { body: {}, signal: new AbortController().signal }
-    await expect(provider.prepare(request)).rejects.toThrow('cannot resolve active package "dsh-desktop-bridge"')
+    // 0.2.1 omits unreadable identities instead of failing the model request.
+    expect((await provider.prepare(request)).value.packages).toEqual([])
     await ensureDesktopPluginLinks(paths)
     expect((await provider.prepare(request)).value.packages).toEqual(packageNames.map((name) => ({ name, version: '0.1.0' })))
   })

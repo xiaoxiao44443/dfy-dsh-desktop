@@ -135,12 +135,13 @@ export interface PluginMutationResult {
   restartRequired?: boolean
 }
 
-/** A plugin's unsatisfied DSH peer requirements, reported by rc.1 and later. */
+/** Unsatisfied DSH requirements; older runtimes report the legacy peers field. */
 export interface PluginCompatibilityIssue {
   name: string
   version: string
   runtimeVersion: string
-  peers: Record<string, string>
+  requirements?: Record<string, string>
+  peers?: Record<string, string>
 }
 
 /** Public outcome of DSH pluginManager.setBundleEnabled. */

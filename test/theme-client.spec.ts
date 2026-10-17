@@ -8,6 +8,7 @@ const packagePath = createRequire(import.meta.url).resolve('@deepseek-ai/dsh/pac
 const harnessRequire = createRequire(realpathSync(packagePath))
 const { Config } = await import(pathToFileURL(harnessRequire.resolve('@deepseek-ai/dsh-client-ui-theme')).href)
 const schema = Config.toJSON()
+const fontDefaults = { codeFontSize: 11, terminalFontSize: 13, textFontFamily: '', codeFontFamily: '', terminalFontFamily: '' }
 const tick = async () => { for (let i = 0; i < 15; i++) await Promise.resolve() }
 
 async function fixture(guarded = true) {
@@ -15,7 +16,7 @@ async function fixture(guarded = true) {
   let fontSize = 14
   let revision = 0
   const row = () => ({ ns: 'ui-theme', revision: String(revision), base: {}, user: { preference },
-    value: { preference, fontSize }, schema })
+    value: { ...fontDefaults, preference, fontSize }, schema })
   const pending: Array<{ field: string; value: string | number; resolve: (value: unknown) => void; reject: (error: Error) => void }> = []
   const mutate = vi.fn((_namespace: string, ops: Array<{ path: string[]; value: string | number }>) => new Promise((resolve, reject) => {
     pending.push({ field: ops[0]!.path[0]!, value: ops[0]!.value, resolve, reject })
@@ -42,7 +43,7 @@ async function fixture(guarded = true) {
 }
 
 describe('official theme preference writes', () => {
-  it('reproduces the upstream replay from a describe response between writes', async () => {
+  it('uses upstream write ordering to ignore stale describe responses', async () => {
     const f = await fixture(false)
     try {
       f.theme.setTheme('dark')
@@ -51,7 +52,7 @@ describe('official theme preference writes', () => {
       await f.external('dark')
       await f.accept()
       await f.accept()
-      expect(f.changes).toEqual(['dark', 'light', 'dark', 'light'])
+      expect(f.changes).toEqual(['dark', 'light'])
     } finally { await f.dispose() }
   })
 
@@ -89,25 +90,44 @@ describe('official theme preference writes', () => {
     const f = await fixture()
     try {
       f.theme.setTheme('dark')
-      f.theme.setFontSize(15)
+      f.theme.setFontSize('text', 15)
       await tick()
       await f.external('light')
       await f.accept()
       expect(f.theme.getTheme().preference).toBe('dark')
       await f.accept()
-      expect(f.theme.getTheme()).toMatchObject({ preference: 'dark', fontSize: 15 })
+      expect(f.theme.getTheme()).toMatchObject({ preference: 'dark', fontSizes: { text: 15, code: 11, terminal: 13 } })
       expect(f.mutate).toHaveBeenCalledTimes(2)
     } finally { await f.dispose() }
   })
 
-  it('restores the original hooks when the bridge is disposed', async () => {
+  it('restores native mutation after overlapping bridge reloads', async () => {
+    const f = await fixture(false)
+    try {
+      const original = f.form.mutate
+      const disposeOld = f.guard()
+      const disposeNew = f.guard()
+      disposeOld()
+      expect(f.form.mutate).not.toBe(original)
+      disposeNew()
+      expect(f.form.mutate).toBe(original)
+    } finally { await f.dispose() }
+  })
+
+  it('does not patch native theme adoption or settings writes on 0.2.1', async () => {
     const f = await fixture()
     try {
+      const adopt = f.theme.adopt
+      const set = f.form.set
+      const dispose = f.guard()
+      expect(f.theme.adopt).toBe(adopt)
+      expect(f.form.set).toBe(set)
+      dispose()
       f.disposeGuard()
       f.theme.setTheme('dark')
       await tick()
       await f.external('light')
-      expect(f.theme.getTheme().preference).toBe('light')
+      expect(f.theme.getTheme().preference).toBe('dark')
       await f.accept()
     } finally { await f.dispose() }
   })
@@ -119,7 +139,7 @@ describe('native theme synchronization during startup', () => {
     let preference = savedPreference
     let revision = 0
     const row = () => ({ ns: 'ui-theme', revision: String(revision), base: {}, user: { preference },
-      value: { preference, fontSize: 14 }, schema })
+      value: { ...fontDefaults, preference, fontSize: 14 }, schema })
     const mutate = vi.fn(async (_namespace: string, ops: Array<{ value: string }>) => {
       preference = ops[0]!.value
       revision++
@@ -173,7 +193,7 @@ describe('native theme synchronization during startup', () => {
       await f.accept()
       await f.accept()
       expect(preferences()).toEqual(['light', 'dark', 'light', 'dark'])
-      f.theme.setFontSize(15)
+      f.theme.setFontSize('text', 15)
       await tick()
       await f.accept()
       expect(preferences()).toHaveLength(4)

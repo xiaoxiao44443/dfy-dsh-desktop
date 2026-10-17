@@ -11,6 +11,7 @@ import type { PluginManagementService } from './plugin-management.js'
 import { parsePluginInitializationFailures, type PluginRecoveryService } from './plugin-recovery.js'
 import { appendPluginContextMenuItems, BUILTIN_CONTEXT_MENU_ACTIONS, buildBuiltinContextMenuItems } from './context-menu.js'
 import { installWindowMenuDismissal } from './window-menu-dismissal.js'
+import { installExternalWindowHandling } from './external-windows.js'
 import { BrowserDevToolsController } from './browser-devtools.js'
 import { DEFAULT_BROWSER_SETTINGS, type DesktopBrowserService } from './desktop-browser.js'
 import { isSupportedBrowserUrl } from '../shared/browser-address.js'
@@ -212,10 +213,7 @@ export class WindowController {
       this.window = undefined
     })
 
-    window.webContents.setWindowOpenHandler(({ url }) => {
-      if (url.startsWith('https://') || url.startsWith('http://')) void shell.openExternal(url)
-      return { action: 'deny' }
-    })
+    installExternalWindowHandling(window, (url) => this.harnessOrigin !== undefined && this.safeOrigin(url) === this.harnessOrigin)
     if (!developerToolsEnabled) {
       window.webContents.on('devtools-opened', () => window.webContents.closeDevTools())
     }

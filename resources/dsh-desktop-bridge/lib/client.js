@@ -746,6 +746,29 @@ window.__ModuleLoader__.load({
 		// adoption until its latest preference write settles; keep the official queue,
 		// revisions and failure recovery as the authority. No extra preference writes.
 		function installThemeWriteGuard(theme, form, refresh) {
+			// 0.2.1 owns write ordering for all font roles and theme preferences.
+			// Keep ordering untouched; a disconnected transport still rejects the
+			// fire-and-forget write, so retain only rejection recovery at the form.
+			if (theme.getTheme?.().fontSizes !== undefined) {
+				const recoveryKey = Symbol.for("dsh-desktop/theme-write-recovery");
+				form[recoveryKey]?.();
+				const originalMutate = form.mutate;
+				let disposed = false;
+				const mutate = function (...args) {
+					return originalMutate.apply(this, args).catch(async () => {
+						if (!disposed) { try { await refresh(); } catch {} }
+						return false;
+					});
+				};
+				form.mutate = mutate;
+				const dispose = () => {
+					disposed = true;
+					if (form.mutate === mutate) form.mutate = originalMutate;
+					if (form[recoveryKey] === dispose) delete form[recoveryKey];
+				};
+				form[recoveryKey] = dispose;
+				return dispose;
+			}
 			if (typeof theme.adopt !== "function") return () => {};
 			const originalAdopt = theme.adopt;
 			const originalSet = form.set;

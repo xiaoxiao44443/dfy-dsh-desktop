@@ -7,7 +7,7 @@ export const DFY_PLUGIN_CATALOG_URL = 'https://raw.githubusercontent.com/xiaoxia
 // Used until the remote directory is available, including on a first offline launch.
 export const DFY_PLUGINS: DfyPluginDefinition[] = [
   { name: '@dfy-plugins/dsh-wallpaper', title: '壁纸', category: '界面', description: '为主界面、设置面板和右侧栏分别设置背景图片与显示效果。' },
-  { name: '@dfy-plugins/dsh-appearance', title: '外观', category: '界面', description: '调整对话字号、行距和本地文件的打开方式。' },
+  { name: '@dfy-plugins/dsh-appearance', title: '外观', category: '界面', description: '调整对话行距和本地文件的打开方式；字体与字号使用官方设置。' },
   { name: '@dfy-plugins/dsh-archive-manager', title: '归档管理', category: '对话', description: '按项目浏览归档对话，支持恢复和永久删除。' },
   { name: '@dfy-plugins/dsh-media-blocks', title: '媒体内容', category: '图片', description: '展示持久图片内容，并为视觉和生图插件提供媒体增强。' },
   { name: '@dfy-plugins/dsh-image-generation', title: '图像生成', category: '图片', description: '在对话中生成和编辑图片，支持参考图与结果预览。', note: '安装后需配置图片模型。' },
