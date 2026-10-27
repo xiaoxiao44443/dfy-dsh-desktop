@@ -2,6 +2,7 @@ import { access, readdir, readFile, realpath, writeFile } from 'node:fs/promises
 import { createRequire } from 'node:module'
 import type { Dirent } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
+import { stripVTControlCharacters } from 'node:util'
 import { dialog, type BrowserWindow } from 'electron'
 import { valid } from 'semver'
 import { DFY_PLUGINS, DFY_PLUGIN_CATALOG_URL, includedDfyPlugins, isDfyRegistrySource, normalizeDfySelection, parseDfyPluginCatalog } from '../shared/dfy-plugins.js'
@@ -409,19 +410,32 @@ export class PluginManagementService {
       const before = await this.readManifest(join(this.harnessHome, 'profiles', profile, 'package.json'))
       await validate?.(before)
       const result = await this.actions.runPnpm(profile, args)
-      if (result.exitCode === 0) {
+      const output = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join('\n') || '(没有输出)'
+      const warning = isIgnoredBuildsOnly(result.exitCode, output) ? 'ignored-builds' as const : undefined
+      if (result.exitCode === 0 || warning !== undefined) {
         await this.reconcileInstalledBundles(profile, before)
       }
       return {
         inventory: await this.getInventory(),
         command: `pnpm ${args.map(formatDisplayArgument).join(' ')} (Profile ${formatDisplayArgument(profile)})`,
-        output: [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join('\n') || '(没有输出)',
+        output,
         exitCode: result.exitCode,
+        ...(warning === undefined ? {} : { warning }),
       }
     } finally {
       this.commandRunning = false
     }
   }
+}
+
+function isIgnoredBuildsOnly(exitCode: number, output: string): boolean {
+  if (exitCode !== 1) return false
+  const plain = stripVTControlCharacters(output)
+  // pnpm emits this diagnostic after committing the dependency changes. Keep its
+  // original exit code/log, and never downgrade other pnpm or lifecycle failures.
+  const codes = plain.match(/\b(?:ERR_PNPM_[A-Z_]+|ELIFECYCLE)\b/gu) ?? []
+  return codes.length > 0 && codes.every(code => code === 'ERR_PNPM_IGNORED_BUILDS')
+    && /^\s*\[?ERR_PNPM_IGNORED_BUILDS\]?\s+Ignored build scripts:/mu.test(plain)
 }
 
 export function classifyPluginSource(spec: string | undefined): PluginSourceType {

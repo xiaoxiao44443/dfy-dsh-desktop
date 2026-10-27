@@ -133,7 +133,10 @@ describe('PluginManagementService', () => {
       .rejects.toThrow('本地 Link')
   })
 
-  it('reconciles bundle configuration after pnpm changes dependencies', async () => {
+  it.each([
+    { exitCode: 0, stdout: 'done', stderr: '' },
+    { exitCode: 1, stdout: 'Progress: resolved 99, reused 93, downloaded 1, added 1, done', stderr: '[ERR_PNPM_IGNORED_BUILDS] Ignored build scripts: @google/genai@1.52.0, protobufjs@7.6.6' },
+  ])('reconciles installed bundles when pnpm finishes with $exitCode / $stderr', async (commandResult) => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-plugin-reconcile-'))
     roots.push(root)
     const harnessHome = join(root, 'home')
@@ -161,7 +164,7 @@ describe('PluginManagementService', () => {
         if (args[0] === 'add') manifest.dependencies[packageName] = '^1.0.0'
         if (args[0] === 'remove') delete manifest.dependencies[packageName]
         await writeFile(manifestPath, JSON.stringify(manifest))
-        return { exitCode: 0, stdout: 'done', stderr: '' }
+        return commandResult
       },
     })
 
@@ -176,6 +179,44 @@ describe('PluginManagementService', () => {
     manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as typeof manifest
     expect(manifest.dsh.profile.bundles).toEqual(['@deepseek-ai/dsh-base'])
     expect(manifest.dsh.desktop).toBeUndefined()
+  })
+
+  it.each([
+    { exitCode: 0, stderr: '', warning: undefined },
+    { exitCode: 1, stderr: '[ERR_PNPM_IGNORED_BUILDS] Ignored build scripts: @google/genai@1.52.0, protobufjs@7.6.6\nRun "pnpm approve-builds" to pick which dependencies should be allowed to run scripts.', warning: 'ignored-builds' },
+    { exitCode: 1, stderr: '\u001b[31m\u2009ERR_PNPM_IGNORED_BUILDS\u2009\u001b[39m Ignored build scripts: protobufjs@7.6.6', warning: 'ignored-builds' },
+    { exitCode: 1, stderr: '[ERR_PNPM_FETCH_404] Package not found', warning: undefined },
+    { exitCode: 1, stderr: '[ERR_PNPM_IGNORED_BUILDS] Ignored build scripts: protobufjs\n[ERR_PNPM_EPERM] Permission denied', warning: undefined },
+    { exitCode: 1, stderr: '[ERR_PNPM_IGNORED_BUILDS] Ignored build scripts: protobufjs\nELIFECYCLE Command failed with exit code 1.', warning: undefined },
+    { exitCode: 1, stderr: 'See ERR_PNPM_IGNORED_BUILDS in the documentation.', warning: undefined },
+    { exitCode: 130, stderr: '[ERR_PNPM_IGNORED_BUILDS] Ignored build scripts: protobufjs', warning: undefined },
+  ])('preserves update diagnostics and only treats skipped builds as a warning: $exitCode / $stderr', async ({ exitCode, stderr, warning }) => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-plugin-update-result-'))
+    roots.push(root)
+    const profileDir = join(root, 'profiles', 'web')
+    const packageName = 'dsh-codex-connect'
+    const packageDir = join(profileDir, 'node_modules', packageName)
+    await mkdir(packageDir, { recursive: true })
+    await writeFile(join(profileDir, 'package.json'), JSON.stringify({
+      dependencies: { [packageName]: '^1.0.0' },
+      dsh: { profile: { bundles: [packageName] } },
+    }))
+    const stdout = 'Progress: resolved 99, reused 93, downloaded 1, added 1, done'
+    const service = new PluginManagementService(root, {
+      getWindow: () => undefined,
+      runPnpm: async () => {
+        // A changed package alone must not hide an unrelated command failure.
+        await writeFile(join(packageDir, 'package.json'), JSON.stringify({
+          name: packageName, version: '1.0.1', dsh: { bundle: { patch: './cordis.patch.yml' } },
+        }))
+        return { exitCode, stdout, stderr }
+      },
+    })
+    const result = await service.update({ profile: 'web', packageName })
+    expect(result.exitCode).toBe(exitCode)
+    expect(result.warning).toBe(warning)
+    expect(result.output).toBe([stdout, stderr.trim()].filter(Boolean).join('\n'))
+    expect(result.inventory.profiles[0]?.plugins).toContainEqual(expect.objectContaining({ name: packageName, version: '1.0.1' }))
   })
 
   it('shares official bundle choices, preserves disabled plugins during updates and appends on re-enable', async () => {

@@ -644,11 +644,12 @@ export function PluginManager({
     try {
       const result = await action()
       setInventory(result.inventory)
-      if (showResult) setLastResult(result)
-      if (result.exitCode === 0) {
+      if (showResult || result.exitCode !== 0) setLastResult(result)
+      const completed = result.exitCode === 0 || result.warning === 'ignored-builds'
+      if (completed) {
         if (result.restartRequired !== false) setRestartRequired(true)
-      } else setError(result.output || `命令执行失败（退出码 ${result.exitCode}）。`)
-      return result.exitCode === 0
+      }
+      return completed
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : String(nextError))
       return false
@@ -845,13 +846,13 @@ export function PluginManager({
 
         {error ? <p className="plugin-error">{error}</p> : null}
         {lastResult ? (
-          <details className={`plugin-command-result${lastResult.exitCode === 0 ? '' : ' error'}`}>
+          <details className={`plugin-command-result${lastResult.warning === 'ignored-builds' ? ' warning' : lastResult.exitCode === 0 ? '' : ' error'}`}>
             <summary>
-              <span className="plugin-command-status">{lastResult.exitCode === 0 ? '命令执行完成' : '查看失败输出'}</span>
+              <span className="plugin-command-status">{lastResult.warning === 'ignored-builds' ? '已完成，部分脚本未运行' : lastResult.exitCode === 0 ? '命令执行完成' : '查看失败输出'}</span>
               <code title={lastResult.command}>{lastResult.command}</code>
               <ChevronDown className="plugin-command-chevron" aria-hidden="true" />
             </summary>
-            <pre>{lastResult.output}</pre>
+            <pre>{lastResult.output || `命令退出码：${lastResult.exitCode}`}</pre>
           </details>
         ) : null}
 

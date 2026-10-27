@@ -1594,6 +1594,8 @@ body.maximized .restore-icon { display: block; }
   flex-direction: column;
   gap: 10px;
   padding: 14px 16px;
+  overflow: auto;
+  scrollbar-width: thin;
 }
 
 .plugin-toolbar {
@@ -1857,6 +1859,7 @@ body.maximized .restore-icon { display: block; }
 
 .plugin-command-result.error summary,
 .plugin-command-result.error pre { color: #ef9aa1; }
+.plugin-command-result.warning .plugin-command-status { color: #e0b366; }
 
 .plugin-list-toolbar {
   display: grid;
@@ -2546,6 +2549,7 @@ body.maximized .restore-icon { display: block; }
 }
 
 :root[data-theme="light"] .command-output.error { color: #b52f3b; }
+:root[data-theme="light"] .plugin-command-result.warning .plugin-command-status { color: #8a5b18; }
 :root[data-theme="light"] .dfy-github-button { color: #333; }
 :root[data-theme="light"] .plugin-error,
 :root[data-theme="light"] .plugin-command-result.error summary,

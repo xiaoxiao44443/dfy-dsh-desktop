@@ -132,6 +132,8 @@ export interface PluginMutationResult {
   command: string
   output: string
   exitCode: number
+  /** pnpm completed the package changes but skipped unapproved dependency builds. */
+  warning?: 'ignored-builds'
   restartRequired?: boolean
 }
 
