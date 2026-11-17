@@ -48,9 +48,9 @@ jobs:
             source_sha="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run}" --jq .head_sha)"
             [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
             git fetch --no-tags origin "$source_sha"
-            # A retry may fix the build workflow, but the application must
+            # A retry may fix CI signing/workflows, but the application must
             # still match the existing release tag exactly.
-            git diff --exit-code HEAD "$source_sha" -- . ':(exclude).github/workflows'
+            git diff --exit-code HEAD "$source_sha" -- . ':(exclude).github/workflows' ':(exclude).github/scripts/prepare-macos-signing.cjs'
             gh run download "$run" --repo "$GITHUB_REPOSITORY" \
               --pattern 'dfy-dsh-desktop-*' --dir "downloaded/${run}"
           done

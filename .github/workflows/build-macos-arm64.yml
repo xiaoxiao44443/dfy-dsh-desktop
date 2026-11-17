@@ -54,7 +54,7 @@ jobs:
 
       - name: Build Apple Silicon DMG and ZIP
         run: |
-          # Signing scans the bundled runtime's many files in parallel.
+          node .github/scripts/prepare-macos-signing.cjs
           ulimit -n 65536
           pnpm package:mac:arm64
 

@@ -44,7 +44,7 @@ jobs:
 
       - name: Build Intel DMG and ZIP
         run: |
-          # Signing scans the bundled runtime's many files in parallel.
+          node .github/scripts/prepare-macos-signing.cjs
           ulimit -n 65536
           pnpm package:mac:intel
 
