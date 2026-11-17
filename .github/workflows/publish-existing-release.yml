@@ -1,0 +1,78 @@
+name: Publish verified release artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag
+        type: string
+        required: true
+      artifact_runs:
+        description: Comma-separated workflow run IDs containing the verified Windows and macOS artifacts
+        type: string
+        required: true
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: publish-existing-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      ARTIFACT_RUNS: ${{ inputs.artifact_runs }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Validate sources and collect verified artifacts
+        shell: bash
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][[:alnum:]]+)*$ ]]
+          [[ "$ARTIFACT_RUNS" =~ ^[0-9]+(,[0-9]+)*$ ]]
+          version="${RELEASE_TAG#v}"
+          test "$(node -p 'require("./package.json").version')" = "$version"
+          test -f ".github/release-notes/${RELEASE_TAG}.md"
+          mkdir -p release-assets
+          IFS=, read -r -a runs <<< "$ARTIFACT_RUNS"
+          for run in "${runs[@]}"; do
+            source_sha="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run}" --jq .head_sha)"
+            [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
+            git fetch --no-tags origin "$source_sha"
+            # A retry may fix the build workflow, but the application must
+            # still match the existing release tag exactly.
+            git diff --exit-code HEAD "$source_sha" -- . ':(exclude).github/workflows'
+            gh run download "$run" --repo "$GITHUB_REPOSITORY" \
+              --pattern 'dfy-dsh-desktop-*' --dir "downloaded/${run}"
+          done
+          find downloaded -type f -name "DFY-DSH-Desktop-${version}-*" -exec cp {} release-assets/ \;
+          for suffix in x64.exe macos-x64.dmg macos-x64.zip macos-arm64.dmg macos-arm64.zip; do
+            test -s "release-assets/DFY-DSH-Desktop-${version}-${suffix}"
+          done
+          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 5
+          (cd release-assets && sha256sum * > SHA256SUMS.txt)
+
+      - name: Publish all platforms with release notes
+        shell: bash
+        run: |
+          is_prerelease=false
+          if [[ "${RELEASE_TAG#v}" == *-* ]]; then is_prerelease=true; fi
+          notes_file=".github/release-notes/${RELEASE_TAG}.md"
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --notes-file "$notes_file" --prerelease="$is_prerelease" --draft=false
+          else
+            gh release create "$RELEASE_TAG" release-assets/* --repo "$GITHUB_REPOSITORY" \
+              --verify-tag --title "DFY DSH Desktop ${RELEASE_TAG#v}" \
+              --notes-file "$notes_file" --prerelease="$is_prerelease"
+          fi

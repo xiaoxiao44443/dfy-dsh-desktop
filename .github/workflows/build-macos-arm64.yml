@@ -3,6 +3,12 @@ name: Build macOS Apple Silicon
 on:
   workflow_call:
   workflow_dispatch:
+    inputs:
+      runner:
+        description: Apple Silicon runner (use macos-26 if the macos-15 pool is busy)
+        type: choice
+        options: [macos-15, macos-26]
+        default: macos-15
 
 permissions:
   contents: read
@@ -10,7 +16,7 @@ permissions:
 jobs:
   build-macos-arm64:
     name: macOS 12+ Apple Silicon (arm64)
-    runs-on: macos-15
+    runs-on: ${{ inputs.runner || 'macos-15' }}
     timeout-minutes: 45
     env:
       MACOSX_DEPLOYMENT_TARGET: '12.0'
