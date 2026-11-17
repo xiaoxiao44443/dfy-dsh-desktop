@@ -47,7 +47,10 @@ jobs:
         run: pnpm test
 
       - name: Build Apple Silicon DMG and ZIP
-        run: pnpm package:mac:arm64
+        run: |
+          # Signing scans the bundled runtime's many files in parallel.
+          ulimit -n 65536
+          pnpm package:mac:arm64
 
       - name: Verify packaged Harness startup
         run: node scripts/verify-packaged-macos.mjs arm64

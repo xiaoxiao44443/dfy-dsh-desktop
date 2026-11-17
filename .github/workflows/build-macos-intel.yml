@@ -43,7 +43,10 @@ jobs:
         run: pnpm test
 
       - name: Build Intel DMG and ZIP
-        run: pnpm package:mac:intel
+        run: |
+          # Signing scans the bundled runtime's many files in parallel.
+          ulimit -n 65536
+          pnpm package:mac:intel
 
       - name: Verify packaged Harness startup
         run: node scripts/verify-packaged-macos.mjs x64
