@@ -22,6 +22,9 @@ beforeAll(async () => {
       return 1;
     } });
   `)
+  await mkdir(join(root, 'node_modules/node-pty/lib'), { recursive: true })
+  await writeFile(join(root, 'node_modules/node-pty/package.json'), JSON.stringify({ main: 'lib/index.js' }))
+  await writeFile(join(root, 'node_modules/node-pty/lib/index.js'), 'exports.spawn = (...args) => args;')
 }, 20_000)
 afterAll(async () => { if (root !== undefined) await rm(root, { recursive: true, force: true }) })
 
@@ -56,6 +59,52 @@ describe('Harness CLI entry compatibility', () => {
 })
 
 describe('Harness background worker launch compatibility', () => {
+  it.each([
+    { platform: 'win32', electron: true, blocked: true },
+    { platform: 'win32', electron: false, blocked: false },
+    { platform: 'darwin', electron: true, blocked: false },
+  ])('rejects only the unsupported Electron Windows sandbox PTY path ($platform, Electron=$electron)', async ({ platform, electron, blocked }) => {
+    const fixture = `${platform}-${electron}`
+    const preload = join(root, `pty-platform-${fixture}.cjs`)
+    const entry = join(root, `pty-launch-${fixture}.mjs`)
+    await writeFile(preload, `
+      Object.defineProperty(process, 'platform', { value: ${JSON.stringify(platform)} });
+      ${electron ? "Object.defineProperty(process.versions, 'electron', { value: '43.4.0' });" : ''}
+    `)
+    await writeFile(entry, `
+      import { createRequire } from 'node:module';
+      const pty = createRequire(import.meta.url)('node-pty');
+      const options = { cwd: '/workspace', cols: 120, rows: 30, env: { MARKER: 'kept', ELECTRON_NO_ATTACH_CONSOLE: '1' } };
+      const results = [];
+      for (const runner of [
+        '/runtime/node_modules/@deepseek-ai/dsh-sandbox-windows-acl/lib/runner.js',
+        ['C:', 'runtime', 'node_modules', '@deepseek-ai', 'dsh-sandbox-windows-acl', 'src', 'runner.ts'].join(String.fromCharCode(92))
+      ]) {
+        try { results.push({ spawn: pty.spawn(process.execPath, [runner, '--mode', 'workspace-write'], options) }); }
+        catch (error) { results.push({ error: error.message }); }
+      }
+      const shell = pty.spawn('powershell.exe', ['-NoLogo'], options);
+      const otherNode = pty.spawn('node.exe', ['/runtime/node_modules/@deepseek-ai/dsh-sandbox-windows-acl/lib/runner.js'], options);
+      const ordinary = pty.spawn(process.execPath, ['/runtime/node_modules/@deepseek-ai/dsh-subprocess-local/lib/runner.js'], options);
+      console.log(JSON.stringify({ results, shell, otherNode, ordinary, options }));
+    `)
+    const { stdout } = await execute(process.execPath, ['--require', preload, bootstrap, entry])
+    const result = JSON.parse(stdout)
+    for (const launch of result.results) {
+      if (blocked) expect(launch).toEqual({ error: '当前桌面端暂不支持 Windows 沙箱下的 Agent 可见终端。请使用普通命令工具，或手动打开内置终端。' })
+      else {
+        expect(launch).not.toHaveProperty('error')
+        expect(launch.spawn[0]).toBe(process.execPath)
+        expect(launch.spawn[1].slice(1)).toEqual(['--mode', 'workspace-write'])
+        expect(launch.spawn[2]).toEqual(result.options)
+      }
+    }
+    expect(result.shell).toEqual(['powershell.exe', ['-NoLogo'], result.options])
+    expect(result.otherNode).toEqual(['node.exe', ['/runtime/node_modules/@deepseek-ai/dsh-sandbox-windows-acl/lib/runner.js'], result.options])
+    expect(result.ordinary).toEqual([process.execPath, ['/runtime/node_modules/@deepseek-ai/dsh-subprocess-local/lib/runner.js'], result.options])
+    expect(result.options.env).toEqual({ MARKER: 'kept', ELECTRON_NO_ATTACH_CONSOLE: '1' })
+  })
+
   async function captureLaunches(platform: string) {
     const capture = join(root, `capture-${platform}.cjs`)
     const entry = join(root, `launch-${platform}.mjs`)

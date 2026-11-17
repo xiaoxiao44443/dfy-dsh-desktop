@@ -45,6 +45,7 @@ describe('desktop browser settings', () => {
     const effect = vi.fn()
     plugin?.apply({
       effect,
+      inject: () => undefined,
       slots: {
         inject: (_name: string, install: () => unknown) => install(),
         register: (_definition: unknown, component: typeof settingsSection) => {

@@ -40,6 +40,8 @@ describe('HarnessDesktopBridgeHost', () => {
         data: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
       } : undefined),
       handleAgentRequest: vi.fn(async () => ({ ok: true })),
+      createManualTab: vi.fn(async () => undefined),
+      navigate: vi.fn(async () => undefined),
       updateAgentStatus: vi.fn(),
     }
     const host = new HarnessDesktopBridgeHost({
@@ -173,6 +175,23 @@ describe('HarnessDesktopBridgeHost', () => {
     })
     expect(browserAction.status).toBe(200)
     expect(browser.handleAgentRequest).toHaveBeenCalledWith({ action: 'snapshot', sessionId: 'session-1' })
+
+    const openBrowser = (url: unknown, authorized = true) => fetch(`${controlOrigin}/v1/browser/open`, {
+      method: 'POST',
+      headers: { ...(authorized ? { authorization: `Bearer ${launch.controlToken}` } : {}), 'content-type': 'application/json' },
+      body: JSON.stringify({ url }),
+    })
+    expect((await openBrowser('https://example.com', false)).status).toBe(401)
+    for (const url of ['javascript:alert(1)', 'file:///C:/private.txt', '\\\\server\\share\\page.html', 'line\nbreak', 42]) {
+      expect((await openBrowser(url)).status).toBe(400)
+    }
+    expect(browser.createManualTab).not.toHaveBeenCalled()
+    expect((await openBrowser('https://example.com/page?q=1#item')).status).toBe(200)
+    expect(browser.navigate).toHaveBeenCalledWith('https://example.com/page?q=1#item', false)
+    browser.state.settings.enabled = false
+    expect((await openBrowser('https://example.com')).status).toBe(409)
+    expect(browser.createManualTab).toHaveBeenCalledTimes(1)
+    browser.state.settings.enabled = true
 
     const browserAgentStatus = await fetch(`${controlOrigin}/v1/browser/agent-status`, {
       method: 'POST',

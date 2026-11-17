@@ -4,6 +4,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
 import type { DesktopNotificationService } from './desktop-notifications.js'
 import type { DesktopBrowserService } from './desktop-browser.js'
+import { normalizeBrowserAddress } from './desktop-browser-utils.js'
 
 const CONTROL_HOST = '127.0.0.1'
 const MAX_REQUEST_BYTES = 8 * 1_024 * 1_024
@@ -142,6 +143,7 @@ export class HarnessDesktopBridgeHost {
       || pathname === '/v1/browser/screenshots/reveal'
       || pathname === '/v1/browser/agent-status'
       || pathname === '/v1/browser/action'
+      || pathname === '/v1/browser/open'
       || screenshotResource !== null
     if (!supported) {
       this.sendJson(response, 404, { accepted: false, message: 'Not found' })
@@ -287,6 +289,31 @@ export class HarnessDesktopBridgeHost {
       }
       await this.options.browser.revealScreenshotCache()
       this.sendJson(response, 200, { revealed: true })
+      return
+    }
+
+    if (pathname === '/v1/browser/open') {
+      if (request.method !== 'POST') {
+        response.setHeader('allow', 'POST')
+        this.sendJson(response, 405, { accepted: false, message: 'Method not allowed' })
+        return
+      }
+      const body = await this.readJsonBody(request)
+      let url: string
+      try {
+        if (typeof body.url !== 'string' || body.url.length > 8_192 || /[\r\n\0]/u.test(body.url)) throw new Error('Invalid browser URL')
+        url = normalizeBrowserAddress(body.url, false)
+      } catch (error) {
+        this.sendJson(response, 400, { accepted: false, message: error instanceof Error ? error.message : 'Invalid browser URL' })
+        return
+      }
+      if (!this.options.browser.state.settings.enabled) {
+        this.sendJson(response, 409, { accepted: false, message: '内置浏览器已在设置中关闭。' })
+        return
+      }
+      await this.options.browser.createManualTab()
+      await this.options.browser.navigate(url, false)
+      this.sendJson(response, 200, { opened: true })
       return
     }
 

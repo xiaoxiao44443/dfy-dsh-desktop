@@ -118,7 +118,7 @@ function loadOfficialApprovalClient(): { apply(ctx: unknown): void } {
   })
   if (factory === undefined) throw new Error('Official approval bundle did not register')
   return factory((id) => {
-    if (id === 'react' || id === 'react/jsx-runtime' || id === '@deepseek-ai/dsh-client-ui-primitives') return {}
+    if (id === 'react' || id === 'react-dom' || id === 'react/jsx-runtime' || id === '@deepseek-ai/dsh-client-ui-primitives') return {}
     throw new Error(`Unexpected approval dependency: ${id}`)
   })
 }
@@ -286,7 +286,7 @@ describe('desktop notification session transitions', () => {
     expect(send).toHaveBeenCalledTimes(3)
   })
 
-  it.each(['allowed-once', 'rejected'] as const)('answers the real 0.1.7 PendingApproval once with %s', async (decision) => {
+  it.each(['allowed-once', 'rejected'] as const)('answers the shipped PendingApproval once with %s', async (decision) => {
     const client = await loadClientModule()
     const install = client.installSessionNotifications as (ctx: unknown, send: (value: unknown) => Promise<void>) => void
     const source = notificationContext()
@@ -297,7 +297,7 @@ describe('desktop notification session transitions', () => {
       effect: (setup: () => unknown) => setup(),
       inject: (dependencies: string[]) => { expect(dependencies).toEqual(['shortcuts']) },
       locale: { ...source.ctx.locale, register: () => () => {} },
-      slots: { inject: () => {} },
+      slots: { inject: () => {}, registerFactory: () => {} },
       sessions: { scopeOf: () => 'one' },
       remote: { $on: (_name: string, handler: typeof requestApproval) => { requestApproval = handler } },
       uiSession: { registerPendingInteraction: () => (pending: Record<string, unknown>) => {

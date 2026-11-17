@@ -5,6 +5,7 @@ import { createRequire, registerHooks, syncBuiltinESMExports } from 'node:module
 import { isAbsolute, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { registerDfySessionFormatCompatibility } from './harness-session-format-compat.cjs'
+import { registerDesktopPtyCompatibility } from './harness-pty.cjs'
 
 const electronExecutable = process.execPath.toLowerCase()
 const originalSpawn = childProcess.spawn
@@ -187,6 +188,7 @@ async function bootstrap(): Promise<void> {
   if (needsHiddenConsole) ensureHiddenHarnessConsole(harnessEntry)
   registerDesktopBridgeResolver()
   registerDfySessionFormatCompatibility()
+  registerDesktopPtyCompatibility()
   delete process.env.ELECTRON_RUN_AS_NODE
   delete process.env.ELECTRON_NO_ATTACH_CONSOLE
   process.argv = [process.execPath, harnessEntry, ...harnessArgs]

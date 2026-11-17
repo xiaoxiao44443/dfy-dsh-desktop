@@ -13,6 +13,7 @@ window.__ModuleLoader__.load({
     const SCREENSHOTS_PATH = "/api/dsh-desktop/browser/screenshots";
     const REVEAL_SCREENSHOTS_PATH = "/api/dsh-desktop/browser/screenshots/reveal";
     const STYLE_ID = "dsh-desktop-browser-settings-styles";
+    const OPEN_PATH = "/api/dsh-desktop/browser/open";
     const DEFAULT_SETTINGS = Object.freeze({ enabled: true, agentOpenMode: "background", displayMode: "split" });
 
     function normalizeSettings(value) {
@@ -281,9 +282,54 @@ window.__ModuleLoader__.load({
       );
     }
 
+    // Add only our browser destination. Upstream owns the captured target,
+    // keyboard trigger, clipboard, download and native application actions.
+    function installBrowserContextMenus(ctx) {
+      const open = (url) => request(OPEN_PATH, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url })
+      });
+      const action = (url) => [{
+        id: "open", label: "在内置浏览器中打开", icon: { key: "dfy-desktop.browser" },
+        failureLabel: "打开内置浏览器失败，请检查浏览器设置和文件是否存在。",
+        run: async () => { await open(url); }
+      }];
+      const disposers = [ctx.contextMenus.register({
+        id: "dfy-desktop.browser", target: "url", order: 50,
+        resolve: ({ url }) => {
+          try {
+            const parsed = new URL(url);
+            return ["http:", "https:"].includes(parsed.protocol) ? action(parsed.href) : [];
+          } catch { return []; }
+        }
+      }), ctx.contextMenus.register({
+        id: "dfy-desktop.browser", target: "file", order: 50,
+        resolve: async ({ sessionId, path }, signal) => {
+          if (!/\.(?:html?|xhtml)$/iu.test(path)) return [];
+          // Resolve relative paths in the captured session, never the current
+          // pane or a DOM label that can change while metadata is loading.
+          const result = await ctx.remote.workspaceFiles.stat(sessionId, path, signal);
+          signal.throwIfAborted();
+          if (!result.ok || !/\.(?:html?|xhtml)$/iu.test(result.value.absolutePath)) return [];
+          return action(result.value.absolutePath);
+        }
+      })];
+      return () => { for (const dispose of disposers.reverse()) dispose(); };
+    }
+
+    exports.installBrowserContextMenus = installBrowserContextMenus;
     exports.name = "desktop-browser-settings";
     exports.inject = ["slots"];
     exports.apply = function apply(ctx) {
+      // Optional for older managed runtimes; do not require a newer package
+      // just to load the existing browser settings and tools.
+      ctx.inject(["contextMenus", "remote", "remote.workspaceFiles"], (child) => {
+        child.effect(() => installBrowserContextMenus(child), "desktop-browser: official context menus");
+        child.slots.inject("contextMenu.icon", () => child.slots.register({
+          name: "contextMenu.icon", key: "dfy-desktop.browser"
+        }, () => React.createElement("svg", { viewBox: "0 0 24 24", width: 14, height: 14, fill: "none", stroke: "currentColor", strokeWidth: 1.7, "aria-hidden": true },
+          React.createElement("rect", { x: 3, y: 4, width: 18, height: 16, rx: 2 }),
+          React.createElement("path", { d: "M3 8h18M9 8v12" }))));
+      });
       ctx.slots.inject("settings.section", () => ctx.slots.register({
         name: "settings.section",
         id: "desktop-browser",

@@ -13,6 +13,7 @@ const HISTORY_PATH = '/api/dsh-desktop/browser/history'
 const CLEAR_DATA_PATH = '/api/dsh-desktop/browser/clear-data'
 const SCREENSHOTS_PATH = '/api/dsh-desktop/browser/screenshots'
 const REVEAL_SCREENSHOTS_PATH = '/api/dsh-desktop/browser/screenshots/reveal'
+const OPEN_PATH = '/api/dsh-desktop/browser/open'
 const AGENT_STATUS_PATH = '/v1/browser/agent-status'
 const MAX_PROXY_BODY_BYTES = 65_536
 const MAX_BROWSER_SCRIPT_CHARS = 16_000
@@ -950,6 +951,7 @@ function registerRoutes(ctx, controlUrl, controlToken, refreshSettings) {
     [CLEAR_DATA_PATH, '/v1/browser/clear-data', ['POST']],
     [SCREENSHOTS_PATH, '/v1/browser/screenshots', ['GET', 'DELETE']],
     [REVEAL_SCREENSHOTS_PATH, '/v1/browser/screenshots/reveal', ['POST']],
+    [OPEN_PATH, '/v1/browser/open', ['POST']],
   ]
   for (const [path, target, methods] of routes) {
     ctx.webServer.register({
